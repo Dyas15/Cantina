@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1768522850038,
+      "tag": "0000_nebulous_wallflower",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1768522935119,
+      "tag": "0001_lovely_black_bird",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1768524190784,
+      "tag": "0002_sweet_pyro",
+      "breakpoints": true
+    }
+  ]
+}
