@@ -1,3 +1,7 @@
+import { createLogger } from "./logger";
+
+const logger = createLogger('Config');
+
 /**
  * Valida variáveis de ambiente obrigatórias
  * Sistema não inicia se variáveis críticas estiverem faltando
@@ -39,7 +43,7 @@ export function validateEnv() {
 
   // Mostrar erros (bloqueiam inicialização)
   if (errors.length > 0) {
-    console.error("\n❌ ERROS DE CONFIGURAÇÃO:\n");
+    logger.error("ERROS DE CONFIGURAÇÃO", { errors });
     errors.forEach((error) => console.error(`  - ${error}`));
     console.error("\nPor favor, corrija os erros acima antes de continuar.\n");
     process.exit(1);
@@ -47,10 +51,9 @@ export function validateEnv() {
 
   // Mostrar avisos (não bloqueiam em desenvolvimento)
   if (warnings.length > 0) {
-    console.warn("\n⚠️  AVISOS DE CONFIGURAÇÃO:\n");
+    logger.warn("AVISOS DE CONFIGURAÇÃO", { warnings });
     warnings.forEach((warning) => console.warn(`  ${warning}`));
-    console.warn("");
   }
 
-  console.log("✅ Variáveis de ambiente validadas com sucesso!");
+  logger.info("Variáveis de ambiente validadas com sucesso");
 }

@@ -10,6 +10,9 @@ import { validateEnv } from "./validateEnv";
 import { createHealthRouter } from "./health";
 import { loginRateLimiter, apiRateLimiter } from "./rateLimit";
 import { eventEmitter } from "./events";
+import { createLogger, logRequest } from "./logger";
+
+const logger = createLogger('Server');
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -31,6 +34,13 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
+  logger.info('Iniciando servidor...', {
+    nodeEnv: process.env.NODE_ENV,
+    port: process.env.PORT,
+    hasDbUrl: !!process.env.DATABASE_URL,
+    hasJwtSecret: !!process.env.JWT_SECRET,
+  });
+
   // Valida variáveis de ambiente antes de iniciar
   validateEnv();
 
@@ -40,6 +50,21 @@ async function startServer() {
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+  // Middleware de logging de requisições
+  app.use((req, res, next) => {
+    const startTime = Date.now();
+    
+    res.on('finish', () => {
+      const duration = Date.now() - startTime;
+      // Não loga health checks para evitar spam
+      if (req.path !== '/health') {
+        logRequest(req.method, req.path, res.statusCode, duration);
+      }
+    });
+    
+    next();
+  });
   
   // Health check endpoint (antes de tudo, para monitoramento)
   app.use(createHealthRouter());
@@ -124,8 +149,14 @@ async function startServer() {
   }
 
   server.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}/`);
+    logger.info(`Servidor iniciado com sucesso`, { 
+      url: `http://localhost:${port}/`,
+      nodeEnv: process.env.NODE_ENV,
+    });
   });
 }
 
-startServer().catch(console.error);
+startServer().catch((error) => {
+  logger.error('Falha ao iniciar servidor', undefined, error);
+  process.exit(1);
+});
