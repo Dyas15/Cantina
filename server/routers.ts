@@ -54,7 +54,6 @@ export const appRouter = router({
     }),
 
     // Login do admin com email e senha
-    // Rate limiting é aplicado no nível do Express (server/_core/index.ts)
     login: publicProcedure
       .input(z.object({
         email: z.string().email("Email inválido"),
@@ -77,13 +76,12 @@ export const appRouter = router({
         
         const sessionToken = await createSessionToken(user.id);
         const cookieOptions = getSessionCookieOptions(ctx.req);
-        // maxAge deve corresponder à expiração do JWT (7 dias)
         ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: SESSION_DURATION_MS });
         
         return { success: true, user: { id: user.id, name: user.name, email: user.email, role: user.role } };
       }),
 
-    // Registro do primeiro admin (só funciona se não houver admins)
+    // Registro do primeiro admin
     setupAdmin: publicProcedure
       .input(z.object({
         name: z.string().min(2, "Nome deve ter pelo menos 2 caracteres"),
@@ -91,7 +89,6 @@ export const appRouter = router({
         password: z.string().min(4, "Senha deve ter pelo menos 4 caracteres"),
       }))
       .mutation(async ({ input, ctx }) => {
-        // Verificar se já existe admin
         const existingAdmin = await db.getUserByEmail(input.email);
         if (existingAdmin) {
           throw new TRPCError({ code: 'CONFLICT', message: 'Já existe um usuário com este email' });
@@ -117,7 +114,6 @@ export const appRouter = router({
         const userId = Number(result[0].insertId);
         const sessionToken = await createSessionToken(userId);
         const cookieOptions = getSessionCookieOptions(ctx.req);
-        // maxAge deve corresponder à expiração do JWT (7 dias)
         ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: SESSION_DURATION_MS });
         
         return { success: true, userId };
@@ -126,7 +122,6 @@ export const appRouter = router({
 
   // ==================== CUSTOMER ROUTES ====================
   customer: router({
-    // Login simplificado - busca ou cria cliente
     identify: publicProcedure
       .input(z.object({
         name: z.string().min(2, "Nome deve ter pelo menos 2 caracteres"),
@@ -137,26 +132,22 @@ export const appRouter = router({
         return customer;
       }),
 
-    // Busca cliente por ID
     getById: publicProcedure
       .input(z.object({ id: z.number() }))
       .query(async ({ input }) => {
         return db.getCustomerById(input.id);
       }),
 
-    // Busca clientes (admin)
     search: adminProcedure
       .input(z.object({ query: z.string() }))
       .query(async ({ input }) => {
         return db.searchCustomers(input.query);
       }),
 
-    // Lista todos os clientes (admin)
     list: adminProcedure.query(async () => {
       return db.getAllCustomers();
     }),
 
-    // Histórico de pedidos do cliente
     getHistory: publicProcedure
       .input(z.object({ customerId: z.number() }))
       .query(async ({ input }) => {
@@ -175,14 +166,12 @@ export const appRouter = router({
         return ordersWithItems;
       }),
 
-    // Dívidas do cliente
     getDebts: publicProcedure
       .input(z.object({ customerId: z.number() }))
       .query(async ({ input }) => {
         return db.getDebtsByCustomer(input.customerId);
       }),
 
-    // Recalcula dívidas do cliente (admin)
     recalculateDebt: adminProcedure
       .input(z.object({ customerId: z.number() }))
       .mutation(async ({ input }) => {
@@ -193,24 +182,20 @@ export const appRouter = router({
 
   // ==================== PRODUCT ROUTES ====================
   product: router({
-    // Lista produtos disponíveis (público)
     listAvailable: publicProcedure.query(async () => {
       return db.getAvailableProducts();
     }),
 
-    // Lista todos os produtos (admin)
     list: adminProcedure.query(async () => {
       return db.getAllProducts();
     }),
 
-    // Busca produto por ID
     getById: publicProcedure
       .input(z.object({ id: z.number() }))
       .query(async ({ input }) => {
         return db.getProductById(input.id);
       }),
 
-    // Cria produto (admin)
     create: adminProcedure
       .input(z.object({
         name: z.string().min(1),
@@ -226,7 +211,6 @@ export const appRouter = router({
         return { id };
       }),
 
-    // Atualiza produto (admin)
     update: adminProcedure
       .input(z.object({
         id: z.number(),
@@ -244,7 +228,6 @@ export const appRouter = router({
         return { success: true };
       }),
 
-    // Deleta produto (admin)
     delete: adminProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
@@ -255,7 +238,6 @@ export const appRouter = router({
 
   // ==================== ORDER ROUTES ====================
   order: router({
-    // Cria pedido
     create: publicProcedure
       .input(z.object({
         customerId: z.number(),
@@ -276,7 +258,6 @@ export const appRouter = router({
         const { items, ...orderData } = input;
         const orderId = await db.createOrder(orderData, items);
         
-        // Emite evento de pedido criado (para tempo real)
         const createdOrder = await db.getOrderById(orderId);
         if (createdOrder) {
           emitOrderCreated(createdOrder);
@@ -285,55 +266,34 @@ export const appRouter = router({
         return { orderId };
       }),
 
-    // Busca pedido por ID
-    // Público, mas com validação: apenas o cliente dono do pedido ou admin pode ver
     getById: publicProcedure
       .input(z.object({ id: z.number() }))
-      .query(async ({ input, ctx }) => {
-        const order = await db.getOrderById(input.id);
-        
-        if (!order) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "Pedido não encontrado" });
-        }
-        
-        // Admin pode ver qualquer pedido
-        if (ctx.user && ctx.user.role === "admin") {
-          return order;
-        }
-        
-        // Cliente só pode ver seus próprios pedidos
-        // Verifica se há customerId no contexto (via localStorage no frontend)
-        // Como não temos autenticação de cliente, permitimos acesso público
-        // mas isso é aceitável pois pedidos não contêm informações sensíveis além do que o cliente já sabe
-        return order;
+      .query(async ({ input }) => {
+        return db.getOrderById(input.id);
       }),
 
-    // Lista pedidos (admin) - CORRIGIDO: agora inclui customer
     list: adminProcedure
       .input(z.object({
-        status: z.string().optional(),
-        paymentStatus: z.string().optional(),
+        status: z.enum(["aguardando_pagamento", "em_preparo", "pronto", "entregue", "cancelado"]).optional(),
         startDate: z.date().optional(),
         endDate: z.date().optional(),
-        customerId: z.number().optional(),
       }).optional())
       .query(async ({ input }) => {
         const orders = await db.getAllOrders(input);
-        const ordersWithDetails = await Promise.all(
+        const ordersWithItems = await Promise.all(
           orders.map(async (order) => {
             const items = await db.getOrderItems(order.id);
             const customer = await db.getCustomerById(order.customerId);
             return { 
               ...order, 
               items,
-              customer: customer || { id: order.customerId, name: 'Cliente não encontrado', phone: '' }
+              customer: customer || { id: order.customerId, name: 'Cliente', phone: '' }
             };
           })
         );
-        return ordersWithDetails;
+        return ordersWithItems;
       }),
 
-    // Atualiza status do pedido (admin)
     updateStatus: adminProcedure
       .input(z.object({
         id: z.number(),
@@ -341,20 +301,16 @@ export const appRouter = router({
       }))
       .mutation(async ({ input }) => {
         await db.updateOrderStatus(input.id, input.status);
-        
-        // Emite evento de mudança de status para tempo real
         emitOrderStatusChanged(input.id, input.status);
         
-        // Busca pedido atualizado e emite evento completo
-        const order = await db.getOrderById(input.id);
-        if (order) {
-          emitOrderUpdated(input.id, order);
+        const updatedOrder = await db.getOrderById(input.id);
+        if (updatedOrder) {
+          emitOrderUpdated(updatedOrder);
         }
         
         return { success: true };
       }),
 
-    // Atualiza status do pagamento (admin) - CORRIGIDO para sincronizar com debts
     updatePaymentStatus: adminProcedure
       .input(z.object({
         id: z.number(),
@@ -362,114 +318,82 @@ export const appRouter = router({
       }))
       .mutation(async ({ input }) => {
         await db.updatePaymentStatus(input.id, input.status);
-        
-        // Emite evento de mudança de pagamento para tempo real
         emitPaymentStatusChanged(input.id, input.status);
         
-        // Busca pedido atualizado e emite evento completo
-        const order = await db.getOrderById(input.id);
-        if (order) {
-          emitOrderUpdated(input.id, order);
+        const updatedOrder = await db.getOrderById(input.id);
+        if (updatedOrder) {
+          emitOrderUpdated(updatedOrder);
         }
         
         return { success: true };
       }),
-  }),
 
-  // ==================== DEBT ROUTES ====================
-  debt: router({
-    // Lista todas as dívidas (admin)
-    list: adminProcedure
-      .input(z.object({ onlyUnpaid: z.boolean().default(true) }).optional())
-      .query(async ({ input }) => {
-        return db.getAllDebts(input?.onlyUnpaid ?? true);
-      }),
-
-    // Marca dívida como paga (admin)
-    markAsPaid: adminProcedure
+    cancel: adminProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
-        await db.markDebtAsPaid(input.id);
+        await db.cancelOrder(input.id);
+        emitOrderStatusChanged(input.id, "cancelado");
+        
+        const updatedOrder = await db.getOrderById(input.id);
+        if (updatedOrder) {
+          emitOrderUpdated(updatedOrder);
+        }
+        
         return { success: true };
       }),
-  }),
 
-  // ==================== PIX ROUTES ====================
-  pix: router({
-    // Gera QR Code Pix (100% server-side - valor vem do banco)
-    generate: publicProcedure
-      .input(z.object({
-        orderId: z.number().min(1, "ID do pedido é obrigatório"),
-      }))
-      .query(async ({ input }) => {
-        // 1. Validação: Chave Pix configurada e válida
-        const pixKey = process.env.PIX_KEY;
-        if (!pixKey || pixKey.trim() === "") {
-          throw new TRPCError({
-            code: "INTERNAL_SERVER_ERROR",
-            message: "Chave Pix não configurada. Entre em contato com o administrador.",
-          });
-        }
-
-        // Valida formato da chave
-        const keyValidation = validatePixKey(pixKey);
-        if (!keyValidation.valid) {
-          throw new TRPCError({
-            code: "INTERNAL_SERVER_ERROR",
-            message: `Chave Pix inválida: ${keyValidation.error}`,
-          });
-        }
-
-        // 2. Busca o pedido no banco (fonte única de verdade para o valor)
+    generatePix: publicProcedure
+      .input(z.object({ orderId: z.number() }))
+      .mutation(async ({ input }) => {
         const order = await db.getOrderById(input.orderId);
-        if (!order) {
-          throw new TRPCError({
-            code: "NOT_FOUND",
-            message: "Pedido não encontrado",
-          });
-        }
-
-        // 3. Valida que o pedido pode receber pagamento Pix
-        if (order.paymentMethod !== "pix") {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: "Este pedido não é para pagamento via Pix",
-          });
-        }
-
-        if (order.paymentStatus === "pago") {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: "Este pedido já foi pago",
-          });
-        }
-
-        // 4. Gera o payload Pix com valor do banco
-        const amount = parseFloat(order.totalAmount);
-        const merchantName = process.env.PIX_MERCHANT_NAME || "Cantina Salete";
-        const merchantCity = process.env.PIX_MERCHANT_CITY || "SAO PAULO";
-        const txId = `PEDIDO${order.orderNumber}`;
-
-        const payload = generatePixPayload({
-          key: pixKey,
-          keyType: keyValidation.type!,
-          amount,
-          merchantName,
-          merchantCity,
-          txId,
-        });
-
+        if (!order) throw new TRPCError({ code: 'NOT_FOUND', message: 'Pedido não encontrado' });
+        
+        const pixKey = process.env.PIX_KEY || "sua-chave-pix@email.com";
+        const payload = await generatePixPayload(pixKey, order.customer.name, "Cantina Salete", order.totalAmount);
+        
         return {
           payload,
-          amount,
+          orderId: order.id,
           orderNumber: order.orderNumber,
         };
       }),
   }),
 
+  // ==================== EXPENSE ROUTES ====================
+  expense: router({
+    create: adminProcedure
+      .input(z.object({
+        description: z.string().min(1, "Descrição é obrigatória"),
+        amount: z.string(),
+        category: z.string().default("geral"),
+        date: z.date(),
+        notes: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const id = await db.createExpense(input);
+        return { id };
+      }),
+
+    list: adminProcedure
+      .input(z.object({
+        startDate: z.date().optional(),
+        endDate: z.date().optional(),
+        category: z.string().optional(),
+      }).optional())
+      .query(async ({ input }) => {
+        return db.getAllExpenses(input);
+      }),
+
+    delete: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        await db.deleteExpense(input.id);
+        return { success: true };
+      }),
+  }),
+
   // ==================== REPORT ROUTES ====================
   report: router({
-    // Relatório de vendas
     sales: adminProcedure
       .input(z.object({
         startDate: z.date(),
@@ -479,18 +403,6 @@ export const appRouter = router({
         return db.getSalesReport(input.startDate, input.endDate);
       }),
 
-    // Vendas por período (para gráficos)
-    salesByPeriod: adminProcedure
-      .input(z.object({
-        startDate: z.date(),
-        endDate: z.date(),
-        groupBy: z.enum(['day', 'week', 'month']).default('day'),
-      }))
-      .query(async ({ input }) => {
-        return db.getSalesByPeriod(input.startDate, input.endDate, input.groupBy);
-      }),
-
-    // Produtos mais vendidos
     topProducts: adminProcedure
       .input(z.object({
         startDate: z.date(),
@@ -501,7 +413,6 @@ export const appRouter = router({
         return db.getTopProducts(input.startDate, input.endDate, input.limit);
       }),
 
-    // Clientes mais frequentes
     topCustomers: adminProcedure
       .input(z.object({
         startDate: z.date(),
@@ -511,64 +422,48 @@ export const appRouter = router({
       .query(async ({ input }) => {
         return db.getTopCustomers(input.startDate, input.endDate, input.limit);
       }),
-  }),
 
-  // ==================== EXPENSE ROUTES ====================
-  expense: router({
-    // Lista despesas
-    list: adminProcedure
-      .input(z.object({
-        startDate: z.date().optional(),
-        endDate: z.date().optional(),
-      }).optional())
+    topDebtors: adminProcedure
+      .input(z.object({ limit: z.number().default(10) }).optional())
       .query(async ({ input }) => {
-        return db.getAllExpenses(input);
+        return db.getTopDebtors(input?.limit ?? 10);
       }),
 
-    // Cria despesa
-    create: adminProcedure
-      .input(z.object({
-        description: z.string().min(1),
-        amount: z.string(),
-        category: z.string().default("geral"),
-        date: z.date().optional(),
-      }))
-      .mutation(async ({ input }) => {
-        const id = await db.createExpense(input);
-        return { id };
-      }),
-
-    // Atualiza despesa
-    update: adminProcedure
-      .input(z.object({
-        id: z.number(),
-        description: z.string().min(1).optional(),
-        amount: z.string().optional(),
-        category: z.string().optional(),
-        date: z.date().optional(),
-      }))
-      .mutation(async ({ input }) => {
-        const { id, ...data } = input;
-        await db.updateExpense(id, data);
-        return { success: true };
-      }),
-
-    // Deleta despesa
-    delete: adminProcedure
-      .input(z.object({ id: z.number() }))
-      .mutation(async ({ input }) => {
-        await db.deleteExpense(input.id);
-        return { success: true };
-      }),
-
-    // Relatório de despesas
-    report: adminProcedure
+    financialSummary: adminProcedure
       .input(z.object({
         startDate: z.date(),
         endDate: z.date(),
       }))
       .query(async ({ input }) => {
-        return db.getExpenseReport(input.startDate, input.endDate);
+        return db.getFinancialSummary(input.startDate, input.endDate);
+      }),
+
+    salesByPeriod: adminProcedure
+      .input(z.object({
+        startDate: z.date(),
+        endDate: z.date(),
+        groupBy: z.enum(['day', 'week', 'month']).default('day'),
+      }))
+      .query(async ({ input }) => {
+        return db.getSalesByPeriod(input.startDate, input.endDate, input.groupBy);
+      }),
+
+    salesByPaymentMethod: adminProcedure
+      .input(z.object({
+        startDate: z.date(),
+        endDate: z.date(),
+      }))
+      .query(async ({ input }) => {
+        return db.getSalesByPaymentMethod(input.startDate, input.endDate);
+      }),
+
+    salesByCategory: adminProcedure
+      .input(z.object({
+        startDate: z.date(),
+        endDate: z.date(),
+      }))
+      .query(async ({ input }) => {
+        return db.getSalesByCategory(input.startDate, input.endDate);
       }),
   }),
 });
