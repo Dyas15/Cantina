@@ -507,6 +507,36 @@ export async function getOrdersByCustomer(customerId: number): Promise<Order[]> 
   }, `get orders by customer ${customerId}`);
 }
 
+export async function getAllOrders(filters?: {
+  startDate?: Date;
+  endDate?: Date;
+  customerId?: number;
+}): Promise<Order[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  return executeWithLogging('getAllOrders', async () => {
+    let query = db.select().from(orders);
+    const conditions = [];
+
+    if (filters?.startDate) {
+      conditions.push(gte(orders.createdAt, filters.startDate));
+    }
+    if (filters?.endDate) {
+      conditions.push(lte(orders.createdAt, filters.endDate));
+    }
+    if (filters?.customerId) {
+      conditions.push(eq(orders.customerId, filters.customerId));
+    }
+
+    if (conditions.length > 0) {
+      query = query.where(and(...conditions));
+    }
+
+    return query.orderBy(desc(orders.createdAt));
+  }, `get all orders`);
+}
+
 export async function getTodayOrders(): Promise<(Order & { customer: Customer })[]> {
   const db = await getDb();
   if (!db) return [];
