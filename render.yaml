@@ -14,5 +14,11 @@ services:
         generateValue: true
       - key: PORT
         value: 10000
+      - key: PIX_KEY
+        sync: false
+      - key: PIX_MERCHANT_NAME
+        sync: false
+      - key: PIX_MERCHANT_CITY
+        sync: false
     healthCheckPath: /health
     autoDeploy: true
