@@ -3,7 +3,7 @@ services:
     name: cantina-igreja
     runtime: node
     plan: free
-    buildCommand: npm install -g pnpm && pnpm install && pnpm run build
+    buildCommand: npm install -g pnpm && pnpm install --no-frozen-lockfile && pnpm run build
     startCommand: npm run start
     envVars:
       - key: NODE_ENV
