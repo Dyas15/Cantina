@@ -177,13 +177,13 @@ function AdminLoginForm() {
         </form>
         
         <div className="flex flex-col gap-2 w-full">
-          {/* <Button
+          <Button
             variant="ghost"
             onClick={() => setIsSetup(!isSetup)}
             className="w-full"
           >
             {isSetup ? "Já tenho conta" : "Criar primeiro administrador"}
-          </Button> */}
+          </Button>
           <Button
             variant="outline"
             onClick={() => navigate("/")}
