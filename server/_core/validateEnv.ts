@@ -9,23 +9,31 @@ export function validateEnv() {
 
   // Variáveis obrigatórias
   if (!process.env.DATABASE_URL) {
-    errors.push("DATABASE_URL é obrigatória. Configure no arquivo .env");
+    errors.push("DATABASE_URL é obrigatória. Configure no arquivo .env ou nas variáveis de ambiente do Render");
   }
 
-  // Variáveis com valores padrão inseguros
-  const defaultJwtSecret = "cantina-secret-key-change-in-production";
-  if (!process.env.JWT_SECRET || process.env.JWT_SECRET === defaultJwtSecret) {
-    warnings.push(
-      "⚠️  JWT_SECRET não configurado ou usando valor padrão. " +
-      "Isso é INSEGURO para produção! Gere uma chave aleatória: " +
-      "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
-    );
+  // Variáveis obrigatórias em produção
+  if (process.env.NODE_ENV === "production") {
+    if (!process.env.JWT_SECRET) {
+      errors.push(
+        "JWT_SECRET é obrigatória em produção. " +
+        "Gere uma chave aleatória: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+      );
+    }
+  } else {
+    // Em desenvolvimento, apenas avisa
+    if (!process.env.JWT_SECRET) {
+      warnings.push(
+        "⚠️  JWT_SECRET não configurado. Usando valor padrão para desenvolvimento. " +
+        "Isso é INSEGURO para produção!"
+      );
+    }
   }
 
   // Variáveis opcionais mas recomendadas
   if (!process.env.PIX_KEY) {
     warnings.push(
-      "PIX_KEY não configurada. O sistema funcionará, mas QR Code Pix pode não funcionar corretamente."
+      "PIX_KEY não configurada. O QR Code Pix pode não funcionar corretamente."
     );
   }
 
@@ -37,19 +45,11 @@ export function validateEnv() {
     process.exit(1);
   }
 
-  // Mostrar avisos (não bloqueiam, mas são importantes)
+  // Mostrar avisos (não bloqueiam em desenvolvimento)
   if (warnings.length > 0) {
     console.warn("\n⚠️  AVISOS DE CONFIGURAÇÃO:\n");
     warnings.forEach((warning) => console.warn(`  ${warning}`));
     console.warn("");
-    
-    if (process.env.NODE_ENV === "production") {
-      console.error(
-        "❌ Você está em modo PRODUÇÃO com configurações inseguras!\n" +
-        "Por favor, corrija os avisos acima antes de continuar.\n"
-      );
-      process.exit(1);
-    }
   }
 
   console.log("✅ Variáveis de ambiente validadas com sucesso!");

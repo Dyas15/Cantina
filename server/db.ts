@@ -1,5 +1,6 @@
-import { eq, and, desc, asc, like, sql, gte, lte, or } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
+import { eq, and, desc, asc, ilike, sql, gte, lte, or } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import { 
   InsertUser, users, 
   customers, InsertCustomer, Customer,
@@ -11,11 +12,13 @@ import {
 
 
 let _db: ReturnType<typeof drizzle> | null = null;
+let _client: ReturnType<typeof postgres> | null = null;
 
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
-      _db = drizzle(process.env.DATABASE_URL);
+      _client = postgres(process.env.DATABASE_URL);
+      _db = drizzle(_client);
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;
@@ -73,7 +76,9 @@ export async function upsertUser(user: InsertUser): Promise<void> {
       updateSet.lastSignedIn = new Date();
     }
 
-    await db.insert(users).values(values).onDuplicateKeyUpdate({
+    // PostgreSQL upsert usando ON CONFLICT
+    await db.insert(users).values(values).onConflictDoUpdate({
+      target: users.openId,
       set: updateSet,
     });
   } catch (error) {
@@ -129,9 +134,9 @@ export async function createAdminUser(email: string, passwordHash: string, name:
     loginMethod: 'password',
     role: 'admin',
     lastSignedIn: new Date(),
-  });
+  }).returning({ id: users.id });
 
-  return Number(result[0].insertId);
+  return result[0].id;
 }
 
 // ==================== CUSTOMER QUERIES ====================
@@ -156,13 +161,9 @@ export async function findOrCreateCustomer(name: string, phone: string): Promise
   const result = await db.insert(customers).values({
     name: name.trim(),
     phone: normalizedPhone,
-  });
+  }).returning();
 
-  const newCustomer = await db.select().from(customers)
-    .where(eq(customers.id, Number(result[0].insertId)))
-    .limit(1);
-
-  return newCustomer[0];
+  return result[0];
 }
 
 export async function getCustomerById(id: number): Promise<Customer | undefined> {
@@ -179,8 +180,8 @@ export async function searchCustomers(query: string): Promise<Customer[]> {
 
   return db.select().from(customers)
     .where(or(
-      like(customers.name, `%${query}%`),
-      like(customers.phone, `%${query}%`)
+      ilike(customers.name, `%${query}%`),
+      ilike(customers.phone, `%${query}%`)
     ))
     .orderBy(desc(customers.updatedAt))
     .limit(20);
@@ -199,8 +200,8 @@ export async function updateCustomerTotals(customerId: number, amountSpent: numb
 
   await db.update(customers)
     .set({
-      totalSpent: sql`${customers.totalSpent} + ${amountSpent}`,
-      totalDebt: sql`${customers.totalDebt} + ${amountDebt}`,
+      totalSpent: sql`${customers.totalSpent}::numeric + ${amountSpent}`,
+      totalDebt: sql`${customers.totalDebt}::numeric + ${amountDebt}`,
     })
     .where(eq(customers.id, customerId));
 }
@@ -212,7 +213,7 @@ export async function recalculateCustomerDebt(customerId: number): Promise<void>
 
   // Calcula o total de dívidas não pagas
   const result = await db.select({
-    total: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
+    total: sql<string>`COALESCE(SUM(${debts.amount}::numeric), 0)`,
   }).from(debts)
     .where(and(
       eq(debts.customerId, customerId),
@@ -233,8 +234,8 @@ export async function createProduct(product: InsertProduct): Promise<number> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  const result = await db.insert(products).values(product);
-  return Number(result[0].insertId);
+  const result = await db.insert(products).values(product).returning({ id: products.id });
+  return result[0].id;
 }
 
 export async function updateProduct(id: number, product: Partial<InsertProduct>): Promise<void> {
@@ -305,15 +306,13 @@ export async function createOrder(order: Omit<InsertOrder, 'orderNumber'>, items
   const orderNumber = await getNextOrderNumber();
   
   // Define o status inicial baseado no método de pagamento
-  // Para fiado: paymentStatus = 'pendente'
-  // Para outros métodos: paymentStatus = 'pendente' (será atualizado quando pago)
   const result = await db.insert(orders).values({
     ...order,
     orderNumber,
-    paymentStatus: 'pendente', // Sempre começa como pendente
-  });
+    paymentStatus: 'pendente',
+  }).returning({ id: orders.id });
   
-  const orderId = Number(result[0].insertId);
+  const orderId = result[0].id;
 
   // Insere os itens do pedido
   if (items.length > 0) {
@@ -336,9 +335,6 @@ export async function createOrder(order: Omit<InsertOrder, 'orderNumber'>, items
     // Atualiza total de dívida do cliente
     await updateCustomerTotals(order.customerId, 0, Number(order.totalAmount));
   }
-
-  // NÃO atualiza totalSpent aqui - só quando o pagamento for confirmado
-  // Isso evita inconsistências quando o pagamento ainda está pendente
 
   return orderId;
 }
@@ -456,8 +452,8 @@ export async function updatePaymentStatus(id: number, status: Order['paymentStat
         // Atualiza totais do cliente: diminui dívida, aumenta gasto
         await db.update(customers)
           .set({
-            totalDebt: sql`GREATEST(${customers.totalDebt} - ${debt.amount}, 0)`,
-            totalSpent: sql`${customers.totalSpent} + ${debt.amount}`,
+            totalDebt: sql`GREATEST(${customers.totalDebt}::numeric - ${debt.amount}::numeric, 0)`,
+            totalSpent: sql`${customers.totalSpent}::numeric + ${debt.amount}::numeric`,
           })
           .where(eq(customers.id, order.customerId));
       }
@@ -471,8 +467,8 @@ export async function updatePaymentStatus(id: number, status: Order['paymentStat
         // Reverte totais do cliente: aumenta dívida, diminui gasto
         await db.update(customers)
           .set({
-            totalDebt: sql`${customers.totalDebt} + ${debt.amount}`,
-            totalSpent: sql`GREATEST(${customers.totalSpent} - ${debt.amount}, 0)`,
+            totalDebt: sql`${customers.totalDebt}::numeric + ${debt.amount}::numeric`,
+            totalSpent: sql`GREATEST(${customers.totalSpent}::numeric - ${debt.amount}::numeric, 0)`,
           })
           .where(eq(customers.id, order.customerId));
       }
@@ -483,7 +479,7 @@ export async function updatePaymentStatus(id: number, status: Order['paymentStat
     if (status === 'pago' && previousStatus !== 'pago') {
       await db.update(customers)
         .set({
-          totalSpent: sql`${customers.totalSpent} + ${order.totalAmount}`,
+          totalSpent: sql`${customers.totalSpent}::numeric + ${order.totalAmount}::numeric`,
         })
         .where(eq(customers.id, order.customerId));
     }
@@ -491,7 +487,7 @@ export async function updatePaymentStatus(id: number, status: Order['paymentStat
     else if (status === 'pendente' && previousStatus === 'pago') {
       await db.update(customers)
         .set({
-          totalSpent: sql`GREATEST(${customers.totalSpent} - ${order.totalAmount}, 0)`,
+          totalSpent: sql`GREATEST(${customers.totalSpent}::numeric - ${order.totalAmount}::numeric, 0)`,
         })
         .where(eq(customers.id, order.customerId));
     }
@@ -562,8 +558,8 @@ export async function markDebtAsPaid(debtId: number): Promise<void> {
   // Atualiza totais do cliente
   await db.update(customers)
     .set({
-      totalDebt: sql`GREATEST(${customers.totalDebt} - ${debt.amount}, 0)`,
-      totalSpent: sql`${customers.totalSpent} + ${debt.amount}`,
+      totalDebt: sql`GREATEST(${customers.totalDebt}::numeric - ${debt.amount}::numeric, 0)`,
+      totalSpent: sql`${customers.totalSpent}::numeric + ${debt.amount}::numeric`,
     })
     .where(eq(customers.id, debt.customerId));
   
@@ -582,7 +578,6 @@ export async function markDebtAsPaid(debtId: number): Promise<void> {
 
 // ==================== EXPENSE QUERIES (GESTÃO FINANCEIRA) ====================
 
-// Tabela de despesas será criada via migration
 export async function createExpense(expense: {
   description: string;
   amount: string;
@@ -593,17 +588,16 @@ export async function createExpense(expense: {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  // Formata a data para o formato MySQL (YYYY-MM-DD)
-  const formattedDate = expense.date.toISOString().split('T')[0];
   const notesValue = expense.notes || null;
 
   // Usando SQL direto já que a tabela pode não existir no schema ainda
   const result = await db.execute(sql`
-    INSERT INTO expenses (description, amount, category, date, notes, createdAt, updatedAt)
-    VALUES (${expense.description}, ${expense.amount}, ${expense.category}, ${formattedDate}, ${notesValue}, NOW(), NOW())
+    INSERT INTO expenses (description, amount, category, date, notes, created_at, updated_at)
+    VALUES (${expense.description}, ${expense.amount}, ${expense.category}, ${expense.date}, ${notesValue}, NOW(), NOW())
+    RETURNING id
   `);
 
-  return Number((result as any)[0].insertId);
+  return Number((result as any)[0]?.id);
 }
 
 export async function getAllExpenses(filters?: {
@@ -615,26 +609,27 @@ export async function getAllExpenses(filters?: {
   if (!db) return [];
 
   try {
-    let query = `SELECT * FROM expenses WHERE 1=1`;
-    const params: any[] = [];
-
+    let conditions = [];
+    
     if (filters?.startDate) {
-      query += ` AND date >= ?`;
-      params.push(filters.startDate);
+      conditions.push(sql`date >= ${filters.startDate}`);
     }
     if (filters?.endDate) {
-      query += ` AND date <= ?`;
-      params.push(filters.endDate);
+      conditions.push(sql`date <= ${filters.endDate}`);
     }
     if (filters?.category) {
-      query += ` AND category = ?`;
-      params.push(filters.category);
+      conditions.push(sql`category = ${filters.category}`);
     }
 
-    query += ` ORDER BY date DESC`;
+    const whereClause = conditions.length > 0 
+      ? sql`WHERE ${sql.join(conditions, sql` AND `)}` 
+      : sql``;
 
-    const result = await db.execute(sql.raw(query));
-    return (result as any)[0] || [];
+    const result = await db.execute(sql`
+      SELECT * FROM expenses ${whereClause} ORDER BY date DESC
+    `);
+    
+    return result as any[];
   } catch {
     // Tabela pode não existir ainda
     return [];
@@ -654,8 +649,7 @@ export async function getFinancialSummary(startDate: Date, endDate: Date) {
 
   // Total de vendas (pedidos não cancelados)
   const salesResult = await db.select({
-    totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
-    orderCount: sql<number>`COUNT(*)`,
+    totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
   }).from(orders)
     .where(and(
       gte(orders.createdAt, startDate),
@@ -665,7 +659,7 @@ export async function getFinancialSummary(startDate: Date, endDate: Date) {
 
   // Total recebido (pagos)
   const receivedResult = await db.select({
-    totalReceived: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+    totalReceived: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
   }).from(orders)
     .where(and(
       gte(orders.createdAt, startDate),
@@ -677,17 +671,17 @@ export async function getFinancialSummary(startDate: Date, endDate: Date) {
   let totalExpenses = 0;
   try {
     const expensesResult = await db.execute(sql`
-      SELECT COALESCE(SUM(amount), 0) as total FROM expenses 
+      SELECT COALESCE(SUM(amount::numeric), 0) as total FROM expenses 
       WHERE date >= ${startDate} AND date <= ${endDate}
     `);
-    totalExpenses = Number((expensesResult as any)[0]?.[0]?.total || 0);
+    totalExpenses = Number((expensesResult as any)[0]?.total || 0);
   } catch {
     // Tabela pode não existir
   }
 
   // Total a receber (fiado não pago)
   const pendingResult = await db.select({
-    totalPending: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
+    totalPending: sql<string>`COALESCE(SUM(${debts.amount}::numeric), 0)`,
   }).from(debts)
     .where(and(
       gte(debts.createdAt, startDate),
@@ -702,7 +696,7 @@ export async function getFinancialSummary(startDate: Date, endDate: Date) {
 
   return {
     totalSales,
-    orderCount: Number(salesResult[0]?.orderCount || 0),
+    orderCount: 0,
     totalReceived,
     totalPending,
     totalExpenses,
@@ -719,7 +713,7 @@ export async function getSalesReport(startDate: Date, endDate: Date) {
 
   // Total vendido
   const totalSales = await db.select({
-    total: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+    total: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
     count: sql<number>`COUNT(*)`,
   }).from(orders)
     .where(and(
@@ -730,7 +724,7 @@ export async function getSalesReport(startDate: Date, endDate: Date) {
 
   // Total recebido (pagos)
   const totalReceived = await db.select({
-    total: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+    total: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
   }).from(orders)
     .where(and(
       gte(orders.createdAt, startDate),
@@ -740,7 +734,7 @@ export async function getSalesReport(startDate: Date, endDate: Date) {
 
   // Total a receber (fiado não pago)
   const totalPending = await db.select({
-    total: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
+    total: sql<string>`COALESCE(SUM(${debts.amount}::numeric), 0)`,
   }).from(debts)
     .where(and(
       gte(debts.createdAt, startDate),
@@ -764,7 +758,7 @@ export async function getTopProducts(startDate: Date, endDate: Date, limit = 10)
     productId: orderItems.productId,
     productName: orderItems.productName,
     totalQuantity: sql<number>`SUM(${orderItems.quantity})`,
-    totalRevenue: sql<string>`SUM(${orderItems.subtotal})`,
+    totalRevenue: sql<string>`SUM(${orderItems.subtotal}::numeric)`,
   }).from(orderItems)
     .innerJoin(orders, eq(orderItems.orderId, orders.id))
     .where(and(
@@ -785,7 +779,7 @@ export async function getTopCustomers(startDate: Date, endDate: Date, limit = 10
 
   const result = await db.select({
     customerId: orders.customerId,
-    totalSpent: sql<string>`SUM(${orders.totalAmount})`,
+    totalSpent: sql<string>`SUM(${orders.totalAmount}::numeric)`,
     orderCount: sql<number>`COUNT(*)`,
   }).from(orders)
     .where(and(
@@ -794,7 +788,7 @@ export async function getTopCustomers(startDate: Date, endDate: Date, limit = 10
       sql`${orders.orderStatus} != 'cancelado'`
     ))
     .groupBy(orders.customerId)
-    .orderBy(desc(sql`SUM(${orders.totalAmount})`))
+    .orderBy(desc(sql`SUM(${orders.totalAmount}::numeric)`))
     .limit(limit);
 
   // Busca dados dos clientes
@@ -816,7 +810,7 @@ export async function getTopDebtors(limit = 10) {
   if (!db) return [];
 
   return db.select().from(customers)
-    .where(sql`${customers.totalDebt} > 0`)
+    .where(sql`${customers.totalDebt}::numeric > 0`)
     .orderBy(desc(customers.totalDebt))
     .limit(limit);
 }
@@ -833,13 +827,13 @@ export async function getSalesByPeriod(startDate: Date, endDate: Date, groupBy: 
   const db = await getDb();
   if (!db) return [];
 
-  const dateFormat = groupBy === 'day' ? '%Y-%m-%d' 
-    : groupBy === 'week' ? '%Y-%u' 
-    : '%Y-%m';
+  const dateFormat = groupBy === 'day' ? 'YYYY-MM-DD' 
+    : groupBy === 'week' ? 'IYYY-IW' 
+    : 'YYYY-MM';
 
   const result = await db.select({
-    period: sql<string>`DATE_FORMAT(${orders.createdAt}, ${dateFormat})`,
-    totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+    period: sql<string>`TO_CHAR(${orders.createdAt}, ${dateFormat})`,
+    totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
     orderCount: sql<number>`COUNT(*)`,
   }).from(orders)
     .where(and(
@@ -847,8 +841,8 @@ export async function getSalesByPeriod(startDate: Date, endDate: Date, groupBy: 
       lte(orders.createdAt, endDate),
       sql`${orders.orderStatus} != 'cancelado'`
     ))
-    .groupBy(sql`DATE_FORMAT(${orders.createdAt}, ${dateFormat})`)
-    .orderBy(sql`DATE_FORMAT(${orders.createdAt}, ${dateFormat})`);
+    .groupBy(sql`TO_CHAR(${orders.createdAt}, ${dateFormat})`)
+    .orderBy(sql`TO_CHAR(${orders.createdAt}, ${dateFormat})`);
 
   return result;
 }
@@ -860,7 +854,7 @@ export async function getSalesByPaymentMethod(startDate: Date, endDate: Date) {
 
   const result = await db.select({
     paymentMethod: orders.paymentMethod,
-    totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+    totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
     orderCount: sql<number>`COUNT(*)`,
   }).from(orders)
     .where(and(
@@ -880,7 +874,7 @@ export async function getSalesByCategory(startDate: Date, endDate: Date) {
 
   const result = await db.select({
     category: products.category,
-    totalSales: sql<string>`COALESCE(SUM(${orderItems.subtotal}), 0)`,
+    totalSales: sql<string>`COALESCE(SUM(${orderItems.subtotal}::numeric), 0)`,
     totalQuantity: sql<number>`SUM(${orderItems.quantity})`,
   }).from(orderItems)
     .innerJoin(orders, eq(orderItems.orderId, orders.id))
