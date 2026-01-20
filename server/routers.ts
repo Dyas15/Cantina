@@ -164,7 +164,12 @@ export const appRouter = router({
         const ordersWithItems = await Promise.all(
           orders.map(async (order) => {
             const items = await db.getOrderItems(order.id);
-            return { ...order, items };
+            const customer = await db.getCustomerById(order.customerId);
+            return { 
+              ...order, 
+              items,
+              customer: customer || { id: order.customerId, name: 'Cliente', phone: '' }
+            };
           })
         );
         return ordersWithItems;

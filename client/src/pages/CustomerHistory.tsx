@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { trpc } from "@/lib/trpc";
-import { ArrowLeft, Package, AlertCircle, Clock, CheckCircle } from "lucide-react";
+import { ArrowLeft, Package, AlertCircle, Clock, CheckCircle, DollarSign } from "lucide-react";
 
 interface Customer {
   id: number;
@@ -31,6 +31,12 @@ const statusColors: Record<string, string> = {
   cancelado: "status-cancelado",
 };
 
+const paymentStatusLabels: Record<string, string> = {
+  pendente: "Pagamento Pendente",
+  pago: "Pago",
+  cancelado: "Cancelado",
+};
+
 export default function CustomerHistory() {
   const [, navigate] = useLocation();
   const [customer, setCustomer] = useState<Customer | null>(null);
@@ -54,8 +60,29 @@ export default function CustomerHistory() {
     { enabled: !!customer?.id }
   );
 
+  // Dívidas da tabela debts (fiado)
   const unpaidDebts = debts?.filter((d) => !d.isPaid) || [];
-  const totalDebt = unpaidDebts.reduce((sum, d) => sum + parseFloat(d.amount), 0);
+  const totalDebtFromDebts = unpaidDebts.reduce((sum, d) => sum + parseFloat(d.amount), 0);
+
+  // Pedidos com pagamento pendente (qualquer método de pagamento)
+  const pendingPaymentOrders = orders?.filter(
+    (o) => o.paymentStatus === 'pendente' && o.orderStatus !== 'cancelado'
+  ) || [];
+  
+  // Total de pagamentos pendentes (excluindo os que já estão em debts para evitar duplicação)
+  const debtOrderIds = new Set(unpaidDebts.map(d => d.orderId));
+  const pendingPaymentOrdersNotInDebts = pendingPaymentOrders.filter(
+    o => !debtOrderIds.has(o.id)
+  );
+  const totalPendingPayments = pendingPaymentOrdersNotInDebts.reduce(
+    (sum, o) => sum + parseFloat(o.totalAmount), 0
+  );
+
+  // Total geral de dívidas
+  const totalDebt = totalDebtFromDebts + totalPendingPayments;
+
+  // Quantidade total de pendências
+  const totalPendingCount = unpaidDebts.length + pendingPaymentOrdersNotInDebts.length;
 
   if (!customer) return null;
 
@@ -93,9 +120,12 @@ export default function CustomerHistory() {
             <CardContent className="p-4 flex items-center gap-4">
               <AlertCircle className="h-8 w-8 text-orange-600 flex-shrink-0" />
               <div>
-                <p className="font-semibold text-orange-800">Você tem dívidas pendentes</p>
+                <p className="font-semibold text-orange-800">Você tem pagamentos pendentes</p>
                 <p className="text-2xl font-bold text-orange-600">
                   R$ {totalDebt.toFixed(2)}
+                </p>
+                <p className="text-sm text-orange-700 mt-1">
+                  {totalPendingCount} pedido{totalPendingCount > 1 ? 's' : ''} aguardando pagamento
                 </p>
               </div>
             </CardContent>
@@ -108,7 +138,7 @@ export default function CustomerHistory() {
               Pedidos
             </TabsTrigger>
             <TabsTrigger value="debts" className="text-lg">
-              Dívidas {unpaidDebts.length > 0 && `(${unpaidDebts.length})`}
+              Pendentes {totalPendingCount > 0 && `(${totalPendingCount})`}
             </TabsTrigger>
           </TabsList>
 
@@ -148,9 +178,24 @@ export default function CustomerHistory() {
                             {new Date(order.createdAt).toLocaleString("pt-BR")}
                           </p>
                         </div>
-                        <Badge className={statusColors[order.orderStatus]}>
-                          {statusLabels[order.orderStatus]}
-                        </Badge>
+                        <div className="flex flex-col items-end gap-1">
+                          <Badge className={statusColors[order.orderStatus]}>
+                            {statusLabels[order.orderStatus]}
+                          </Badge>
+                          {/* Mostrar status de pagamento */}
+                          {order.paymentStatus === 'pendente' && order.orderStatus !== 'cancelado' && (
+                            <Badge variant="destructive" className="text-xs">
+                              <DollarSign className="h-3 w-3 mr-1" />
+                              {paymentStatusLabels[order.paymentStatus]}
+                            </Badge>
+                          )}
+                          {order.paymentStatus === 'pago' && (
+                            <Badge variant="default" className="text-xs bg-green-600">
+                              <CheckCircle className="h-3 w-3 mr-1" />
+                              Pago
+                            </Badge>
+                          )}
+                        </div>
                       </div>
 
                       <div className="space-y-1">
@@ -181,23 +226,92 @@ export default function CustomerHistory() {
           </TabsContent>
 
           <TabsContent value="debts" className="mt-4">
-            {debtsLoading ? (
+            {(ordersLoading || debtsLoading) ? (
               <div className="text-center py-8">
                 <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full mx-auto" />
               </div>
-            ) : debts?.length === 0 ? (
+            ) : totalPendingCount === 0 ? (
               <Card>
                 <CardContent className="py-12 text-center">
                   <CheckCircle className="h-16 w-16 mx-auto text-green-500" />
                   <p className="mt-4 text-xl text-muted-foreground">
-                    Você não tem dívidas pendentes
+                    Você não tem pagamentos pendentes
                   </p>
                 </CardContent>
               </Card>
             ) : (
               <div className="space-y-4">
-                {debts?.map((debt) => (
-                  <Card key={debt.id} className={debt.isPaid ? "opacity-60" : ""}>
+                {/* Mostrar pedidos com pagamento pendente (não fiado) */}
+                {pendingPaymentOrdersNotInDebts.map((order) => (
+                  <Card 
+                    key={`order-${order.id}`} 
+                    className="border-orange-200 cursor-pointer hover:shadow-md"
+                    onClick={() => navigate(`/pedido/${order.id}`)}
+                  >
+                    <CardContent className="p-4">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <p className="font-bold">Pedido #{order.orderNumber}</p>
+                          <p className="text-sm text-muted-foreground">
+                            {new Date(order.createdAt).toLocaleString("pt-BR")}
+                          </p>
+                          <Badge variant="secondary" className="mt-2 text-xs">
+                            {order.paymentMethod === 'pix' ? 'Pix' : 
+                             order.paymentMethod === 'dinheiro' ? 'Dinheiro' :
+                             order.paymentMethod === 'cartao' ? 'Cartão' : order.paymentMethod}
+                          </Badge>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xl font-bold text-orange-600">
+                            R$ {parseFloat(order.totalAmount).toFixed(2)}
+                          </p>
+                          <Badge variant="destructive" className="mt-1">
+                            Pendente
+                          </Badge>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+
+                {/* Mostrar dívidas (fiado) */}
+                {unpaidDebts.map((debt) => (
+                  <Card 
+                    key={`debt-${debt.id}`} 
+                    className="border-red-200 cursor-pointer hover:shadow-md"
+                    onClick={() => navigate(`/pedido/${debt.orderId}`)}
+                  >
+                    <CardContent className="p-4">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <p className="font-bold">Pedido #{debt.order.orderNumber}</p>
+                          <p className="text-sm text-muted-foreground">
+                            {new Date(debt.createdAt).toLocaleString("pt-BR")}
+                          </p>
+                          <Badge variant="secondary" className="mt-2 text-xs">
+                            Fiado
+                          </Badge>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xl font-bold text-red-600">
+                            R$ {parseFloat(debt.amount).toFixed(2)}
+                          </p>
+                          <Badge variant="destructive" className="mt-1">
+                            Pendente
+                          </Badge>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+
+                {/* Mostrar dívidas já pagas (histórico) */}
+                {debts?.filter(d => d.isPaid).map((debt) => (
+                  <Card 
+                    key={`debt-paid-${debt.id}`} 
+                    className="opacity-60 cursor-pointer hover:shadow-md"
+                    onClick={() => navigate(`/pedido/${debt.orderId}`)}
+                  >
                     <CardContent className="p-4">
                       <div className="flex justify-between items-start">
                         <div>
@@ -210,12 +324,12 @@ export default function CustomerHistory() {
                           <p className="text-xl font-bold text-primary">
                             R$ {parseFloat(debt.amount).toFixed(2)}
                           </p>
-                          <Badge variant={debt.isPaid ? "default" : "destructive"}>
-                            {debt.isPaid ? "Pago" : "Pendente"}
+                          <Badge variant="default" className="mt-1 bg-green-600">
+                            Pago
                           </Badge>
                         </div>
                       </div>
-                      {debt.isPaid && debt.paidAt && (
+                      {debt.paidAt && (
                         <p className="text-sm text-muted-foreground mt-2">
                           Pago em: {new Date(debt.paidAt).toLocaleString("pt-BR")}
                         </p>
