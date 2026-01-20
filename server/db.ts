@@ -36,11 +36,15 @@ export async function getDb() {
       });
 
       // Configuração do cliente postgres
-      // Em produção, força SSL se não estiver explicitamente configurado
       const isProduction = process.env.NODE_ENV === 'production';
       const hasSSLInUrl = databaseUrl.includes('ssl') || databaseUrl.includes('sslmode');
       
       const clientOptions: postgres.Options<{}> = {
+        // --- CORREÇÃO CRÍTICA AQUI ---
+        // Desativa prepared statements para compatibilidade com Supabase Transaction Mode (porta 6543)
+        prepare: false, 
+        // -----------------------------
+
         // Configurações de conexão
         max: 10, // Máximo de conexões no pool
         idle_timeout: 20, // Timeout de conexão ociosa em segundos
@@ -58,7 +62,7 @@ export async function getDb() {
       };
 
       // Configuração SSL para produção
-      // Render, Railway, Supabase e outros provedores geralmente requerem SSL
+      // Se a URL já tiver ?sslmode=require, isso não é estritamente necessário, mas serve de fallback
       if (isProduction && !hasSSLInUrl) {
         logger.info('Produção detectada: habilitando SSL para conexão com banco de dados');
         (clientOptions as any).ssl = { rejectUnauthorized: false };
@@ -96,7 +100,7 @@ export async function getDb() {
 /**
  * Wrapper para executar queries com logging de erros
  */
-async function executeWithLogging<T>(
+export async function executeWithLogging<T>(
   operation: string,
   queryFn: () => Promise<T>,
   queryDescription?: string
