@@ -286,6 +286,7 @@ export const appRouter = router({
       .input(z.object({ id: z.number() }))
       .query(async ({ input, ctx }) => {
         const order = await db.getOrderById(input.id);
+        
         if (!order) {
           throw new TRPCError({ code: "NOT_FOUND", message: "Pedido não encontrado" });
         }
@@ -302,7 +303,7 @@ export const appRouter = router({
         return order;
       }),
 
-    // Lista pedidos (admin)
+    // Lista pedidos (admin) - CORRIGIDO: agora inclui customer
     list: adminProcedure
       .input(z.object({
         status: z.string().optional(),
@@ -313,13 +314,18 @@ export const appRouter = router({
       }).optional())
       .query(async ({ input }) => {
         const orders = await db.getAllOrders(input);
-        const ordersWithItems = await Promise.all(
+        const ordersWithDetails = await Promise.all(
           orders.map(async (order) => {
             const items = await db.getOrderItems(order.id);
-            return { ...order, items };
+            const customer = await db.getCustomerById(order.customerId);
+            return { 
+              ...order, 
+              items,
+              customer: customer || { id: order.customerId, name: 'Cliente não encontrado', phone: '' }
+            };
           })
         );
-        return ordersWithItems;
+        return ordersWithDetails;
       }),
 
     // Atualiza status do pedido (admin)
@@ -399,106 +405,60 @@ export const appRouter = router({
             message: "Chave Pix não configurada. Entre em contato com o administrador.",
           });
         }
-        
-        // Valida formato da chave Pix
-        if (!validatePixKey(pixKey.trim())) {
+
+        // Valida formato da chave
+        const keyValidation = validatePixKey(pixKey);
+        if (!keyValidation.valid) {
           throw new TRPCError({
             code: "INTERNAL_SERVER_ERROR",
-            message: "Chave Pix inválida. Verifique a configuração.",
+            message: `Chave Pix inválida: ${keyValidation.error}`,
           });
         }
 
-        // 2. Validação: Busca pedido no banco (fonte única de verdade)
+        // 2. Busca o pedido no banco (fonte única de verdade para o valor)
         const order = await db.getOrderById(input.orderId);
         if (!order) {
           throw new TRPCError({
             code: "NOT_FOUND",
-            message: "Pedido não encontrado.",
+            message: "Pedido não encontrado",
           });
         }
 
-        // 3. Validação: Pedido deve ter valor válido
-        const orderAmount = parseFloat(order.totalAmount);
-        if (isNaN(orderAmount) || orderAmount <= 0) {
+        // 3. Valida que o pedido pode receber pagamento Pix
+        if (order.paymentMethod !== "pix") {
           throw new TRPCError({
             code: "BAD_REQUEST",
-            message: "Pedido com valor inválido.",
+            message: "Este pedido não é para pagamento via Pix",
           });
         }
 
-        // 4. Validação: Pedido não pode estar cancelado
-        if (order.orderStatus === "cancelado") {
+        if (order.paymentStatus === "pago") {
           throw new TRPCError({
             code: "BAD_REQUEST",
-            message: "Não é possível gerar Pix para pedido cancelado.",
+            message: "Este pedido já foi pago",
           });
         }
 
-        // 5. Validação: Pedido não pode estar já pago (exceto se for Pix pendente)
-        if (order.paymentStatus === "pago" && order.paymentMethod !== "pix") {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: "Pedido já foi pago.",
-          });
-        }
-
-        // 6. Configurações do merchant
+        // 4. Gera o payload Pix com valor do banco
+        const amount = parseFloat(order.totalAmount);
         const merchantName = process.env.PIX_MERCHANT_NAME || "Cantina Salete";
-        const merchantCity = process.env.PIX_MERCHANT_CITY || "Sao Paulo";
+        const merchantCity = process.env.PIX_MERCHANT_CITY || "SAO PAULO";
+        const txId = `PEDIDO${order.orderNumber}`;
 
-        // 7. Gera payload Pix com valor REAL do banco (não aceita valor do frontend)
         const payload = generatePixPayload({
-          pixKey: pixKey.trim(),
-          description: `Pedido #${order.orderNumber} - Cantina Salete`,
+          key: pixKey,
+          keyType: keyValidation.type!,
+          amount,
           merchantName,
           merchantCity,
-          amount: orderAmount, // VALOR DO BANCO - ÚNICA FONTE DE VERDADE
-          transactionId: `ORDER${order.id}`, // ID único baseado no pedido
+          txId,
         });
 
-        // 8. Retorna payload e informações (sem expor valor sensível)
         return {
           payload,
-          orderId: order.id,
+          amount,
           orderNumber: order.orderNumber,
-          // Não retorna o valor para evitar manipulação no frontend
         };
-      }),
-  }),
-
-  // ==================== EXPENSE ROUTES (GESTÃO FINANCEIRA) ====================
-  expense: router({
-    // Cria despesa (admin)
-    create: adminProcedure
-      .input(z.object({
-        description: z.string().min(1, "Descrição é obrigatória"),
-        amount: z.string(),
-        category: z.string().default("geral"),
-        date: z.date(),
-        notes: z.string().optional(),
-      }))
-      .mutation(async ({ input }) => {
-        const id = await db.createExpense(input);
-        return { id };
-      }),
-
-    // Lista despesas (admin)
-    list: adminProcedure
-      .input(z.object({
-        startDate: z.date().optional(),
-        endDate: z.date().optional(),
-        category: z.string().optional(),
-      }).optional())
-      .query(async ({ input }) => {
-        return db.getAllExpenses(input);
-      }),
-
-    // Deleta despesa (admin)
-    delete: adminProcedure
-      .input(z.object({ id: z.number() }))
-      .mutation(async ({ input }) => {
-        await db.deleteExpense(input.id);
-        return { success: true };
       }),
   }),
 
@@ -514,45 +474,6 @@ export const appRouter = router({
         return db.getSalesReport(input.startDate, input.endDate);
       }),
 
-    // Produtos mais vendidos
-    topProducts: adminProcedure
-      .input(z.object({
-        startDate: z.date(),
-        endDate: z.date(),
-        limit: z.number().default(10),
-      }))
-      .query(async ({ input }) => {
-        return db.getTopProducts(input.startDate, input.endDate, input.limit);
-      }),
-
-    // Clientes que mais compraram
-    topCustomers: adminProcedure
-      .input(z.object({
-        startDate: z.date(),
-        endDate: z.date(),
-        limit: z.number().default(10),
-      }))
-      .query(async ({ input }) => {
-        return db.getTopCustomers(input.startDate, input.endDate, input.limit);
-      }),
-
-    // Maiores devedores
-    topDebtors: adminProcedure
-      .input(z.object({ limit: z.number().default(10) }).optional())
-      .query(async ({ input }) => {
-        return db.getTopDebtors(input?.limit ?? 10);
-      }),
-
-    // Resumo financeiro completo (admin)
-    financialSummary: adminProcedure
-      .input(z.object({
-        startDate: z.date(),
-        endDate: z.date(),
-      }))
-      .query(async ({ input }) => {
-        return db.getFinancialSummary(input.startDate, input.endDate);
-      }),
-
     // Vendas por período (para gráficos)
     salesByPeriod: adminProcedure
       .input(z.object({
@@ -564,24 +485,85 @@ export const appRouter = router({
         return db.getSalesByPeriod(input.startDate, input.endDate, input.groupBy);
       }),
 
-    // Vendas por método de pagamento
-    salesByPaymentMethod: adminProcedure
+    // Produtos mais vendidos
+    topProducts: adminProcedure
       .input(z.object({
         startDate: z.date(),
         endDate: z.date(),
+        limit: z.number().default(10),
       }))
       .query(async ({ input }) => {
-        return db.getSalesByPaymentMethod(input.startDate, input.endDate);
+        return db.getTopProducts(input.startDate, input.endDate, input.limit);
       }),
 
-    // Vendas por categoria
-    salesByCategory: adminProcedure
+    // Clientes mais frequentes
+    topCustomers: adminProcedure
+      .input(z.object({
+        startDate: z.date(),
+        endDate: z.date(),
+        limit: z.number().default(10),
+      }))
+      .query(async ({ input }) => {
+        return db.getTopCustomers(input.startDate, input.endDate, input.limit);
+      }),
+  }),
+
+  // ==================== EXPENSE ROUTES ====================
+  expense: router({
+    // Lista despesas
+    list: adminProcedure
+      .input(z.object({
+        startDate: z.date().optional(),
+        endDate: z.date().optional(),
+      }).optional())
+      .query(async ({ input }) => {
+        return db.getAllExpenses(input);
+      }),
+
+    // Cria despesa
+    create: adminProcedure
+      .input(z.object({
+        description: z.string().min(1),
+        amount: z.string(),
+        category: z.string().default("geral"),
+        date: z.date().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const id = await db.createExpense(input);
+        return { id };
+      }),
+
+    // Atualiza despesa
+    update: adminProcedure
+      .input(z.object({
+        id: z.number(),
+        description: z.string().min(1).optional(),
+        amount: z.string().optional(),
+        category: z.string().optional(),
+        date: z.date().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const { id, ...data } = input;
+        await db.updateExpense(id, data);
+        return { success: true };
+      }),
+
+    // Deleta despesa
+    delete: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        await db.deleteExpense(input.id);
+        return { success: true };
+      }),
+
+    // Relatório de despesas
+    report: adminProcedure
       .input(z.object({
         startDate: z.date(),
         endDate: z.date(),
       }))
       .query(async ({ input }) => {
-        return db.getSalesByCategory(input.startDate, input.endDate);
+        return db.getExpenseReport(input.startDate, input.endDate);
       }),
   }),
 });

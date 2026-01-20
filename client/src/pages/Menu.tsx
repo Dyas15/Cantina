@@ -201,9 +201,9 @@ export default function Menu() {
                   <Card key={product.id} className="card-interactive overflow-hidden">
                     <CardContent className="p-0">
                       {/* Layout Mobile: Vertical */}
-                      <div className="flex flex-col sm:flex-row">
+                      <div className="flex flex-col">
                         {product.imageUrl && (
-                          <div className="aspect-product sm:w-32 sm:h-32 lg:w-40 lg:h-40 shrink-0">
+                          <div className="aspect-video w-full shrink-0">
                             <img
                               src={product.imageUrl}
                               alt={product.name}
@@ -213,40 +213,41 @@ export default function Menu() {
                           </div>
                         )}
                         <div className="flex-1 p-3 sm:p-4 flex flex-col">
-                          <div className="flex-1">
-                            <h3 className="font-bold text-base sm:text-lg text-foreground line-clamp-1">
+                          <div className="flex-1 min-h-0">
+                            <h3 className="font-bold text-sm sm:text-base text-foreground line-clamp-1">
                               {product.name}
                             </h3>
                             {product.description && (
-                              <p className="text-sm text-muted-foreground mt-1 truncate-2">
+                              <p className="text-xs sm:text-sm text-muted-foreground mt-1 line-clamp-2">
                                 {product.description}
                               </p>
                             )}
                             {product.flavors && product.flavors.length > 0 && (
-                              <div className="flex flex-wrap gap-1.5 mt-2">
+                              <div className="flex flex-wrap gap-1 mt-2">
                                 {product.flavors.slice(0, 2).map((flavor: string) => (
-                                  <Badge key={flavor} variant="secondary" className="text-xs px-2 py-0.5">
+                                  <Badge key={flavor} variant="secondary" className="text-[10px] sm:text-xs px-1.5 py-0.5">
                                     {flavor}
                                   </Badge>
                                 ))}
                                 {product.flavors.length > 2 && (
-                                  <Badge variant="secondary" className="text-xs px-2 py-0.5">
+                                  <Badge variant="secondary" className="text-[10px] sm:text-xs px-1.5 py-0.5">
                                     +{product.flavors.length - 2}
                                   </Badge>
                                 )}
                               </div>
                             )}
                           </div>
-                          <div className="flex items-center justify-between mt-3 pt-3 border-t">
-                            <span className="text-lg sm:text-xl font-bold text-primary">
+                          {/* Preço e Botão - Layout corrigido para mobile */}
+                          <div className="flex flex-col gap-2 mt-3 pt-3 border-t">
+                            <span className="text-base sm:text-lg font-bold text-primary">
                               R$ {parseFloat(product.price).toFixed(2)}
                             </span>
                             <Button
                               size="sm"
                               onClick={() => handleAddToCart(product)}
-                              className="btn-primary h-10 px-4"
+                              className="btn-primary h-9 sm:h-10 w-full text-sm"
                             >
-                              <Plus className="h-5 w-5 mr-1" />
+                              <Plus className="h-4 w-4 mr-1" />
                               Adicionar
                             </Button>
                           </div>

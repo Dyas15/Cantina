@@ -14,7 +14,6 @@ import {
   TrendingUp,
   Users,
   Wallet,
-  Eye
 } from "lucide-react";
 
 export default function AdminDashboard() {
@@ -225,7 +224,7 @@ export default function AdminDashboard() {
                   >
                     <div className="min-w-0 flex-1">
                       <p className="font-semibold text-sm sm:text-base truncate">
-                        #{order.orderNumber} - {order.customer.name}
+                        #{order.orderNumber} - {order.customer?.name || 'Cliente'}
                       </p>
                       <p className="text-xs sm:text-sm text-muted-foreground">
                         {order.items?.length || 0} itens • {order.paymentMethod}
