@@ -164,7 +164,7 @@ function AdminLoginForm() {
             />
           </div>
           
-          {/* <Button
+          <Button
             type="submit"
             className="btn-primary w-full"
             disabled={loginMutation.isPending || setupMutation.isPending}
@@ -173,7 +173,7 @@ function AdminLoginForm() {
               ? "Carregando..." 
               : isSetup ? "Criar Administrador" : "Entrar"
             }
-          </Button> */}
+          </Button>
         </form>
         
         <div className="flex flex-col gap-2 w-full">
