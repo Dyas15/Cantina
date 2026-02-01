@@ -111,7 +111,7 @@ export const appRouter = router({
           lastSignedIn: new Date(),
         });
         
-        const userId = Number(result[0].insertId);
+        const userId = (result as any)[0]?.insertId;
         const sessionToken = await createSessionToken(userId);
         const cookieOptions = getSessionCookieOptions(ctx.req);
         ctx.res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: SESSION_DURATION_MS });
@@ -164,6 +164,13 @@ export const appRouter = router({
           })
         );
         return ordersWithItems;
+      }),
+
+    // Nova rota: pedidos pendentes do cliente (não entregues)
+    getPendingOrders: publicProcedure
+      .input(z.object({ customerId: z.number() }))
+      .query(async ({ input }) => {
+        return db.getCustomerPendingOrders(input.customerId);
       }),
 
     getDebts: publicProcedure
@@ -305,7 +312,7 @@ export const appRouter = router({
         
         const updatedOrder = await db.getOrderById(input.id);
         if (updatedOrder) {
-          emitOrderUpdated(updatedOrder);
+          emitOrderUpdated(input.id, updatedOrder);
         }
         
         return { success: true };
@@ -322,7 +329,7 @@ export const appRouter = router({
         
         const updatedOrder = await db.getOrderById(input.id);
         if (updatedOrder) {
-          emitOrderUpdated(updatedOrder);
+          emitOrderUpdated(input.id, updatedOrder);
         }
         
         return { success: true };
@@ -336,7 +343,7 @@ export const appRouter = router({
         
         const updatedOrder = await db.getOrderById(input.id);
         if (updatedOrder) {
-          emitOrderUpdated(updatedOrder);
+          emitOrderUpdated(input.id, updatedOrder);
         }
         
         return { success: true };
@@ -356,6 +363,41 @@ export const appRouter = router({
           orderId: order.id,
           orderNumber: order.orderNumber,
         };
+      }),
+  }),
+
+  // ==================== PIX ROUTES (para uso com gateway) ====================
+  pix: router({
+    generate: publicProcedure
+      .input(z.object({ orderId: z.number() }))
+      .query(async ({ input }) => {
+        const order = await db.getOrderById(input.orderId);
+        if (!order) throw new TRPCError({ code: 'NOT_FOUND', message: 'Pedido não encontrado' });
+        
+        const pixKey = process.env.PIX_KEY || "sua-chave-pix@email.com";
+        const payload = await generatePixPayload(pixKey, order.customer.name, "Cantina Salete", order.totalAmount);
+        
+        return {
+          payload,
+          orderId: order.id,
+          orderNumber: order.orderNumber,
+        };
+      }),
+  }),
+
+  // ==================== DEBT ROUTES ====================
+  debt: router({
+    list: adminProcedure
+      .input(z.object({ onlyUnpaid: z.boolean().default(true) }).optional())
+      .query(async ({ input }) => {
+        return db.getAllDebts(input?.onlyUnpaid ?? true);
+      }),
+
+    markAsPaid: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        await db.markDebtAsPaid(input.id);
+        return { success: true };
       }),
   }),
 
@@ -464,6 +506,123 @@ export const appRouter = router({
       }))
       .query(async ({ input }) => {
         return db.getSalesByCategory(input.startDate, input.endDate);
+      }),
+  }),
+
+  // ==================== PAYMENT GATEWAY ROUTES (preparação) ====================
+  payment: router({
+    // Criar transação de pagamento (PIX ou Cartão)
+    createTransaction: publicProcedure
+      .input(z.object({
+        orderId: z.number(),
+        paymentMethod: z.enum(["pix", "cartao"]),
+        savedCardId: z.number().optional(), // Para pagamento com cartão salvo
+      }))
+      .mutation(async ({ input }) => {
+        const order = await db.getOrderById(input.orderId);
+        if (!order) throw new TRPCError({ code: 'NOT_FOUND', message: 'Pedido não encontrado' });
+
+        // TODO: Integrar com gateway de pagamento real
+        // Por enquanto, cria transação local para rastreamento
+        
+        if (input.paymentMethod === 'pix') {
+          // Gera PIX
+          const pixKey = process.env.PIX_KEY || "sua-chave-pix@email.com";
+          const payload = await generatePixPayload(pixKey, order.customer.name, "Cantina Salete", order.totalAmount);
+          
+          const transactionId = await db.createPaymentTransaction({
+            orderId: order.id,
+            customerId: order.customerId,
+            paymentMethod: 'pix',
+            amount: order.totalAmount,
+            status: 'pending',
+            pixCode: payload,
+            pixExpiresAt: new Date(Date.now() + 30 * 60 * 1000), // 30 minutos
+          });
+
+          return {
+            transactionId,
+            paymentMethod: 'pix',
+            pixCode: payload,
+            expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+          };
+        } else {
+          // Cartão - precisa de gateway
+          // Por enquanto retorna erro indicando que precisa configurar
+          throw new TRPCError({ 
+            code: 'NOT_IMPLEMENTED', 
+            message: 'Gateway de pagamento não configurado. Configure PAYMENT_GATEWAY_API_KEY no .env' 
+          });
+        }
+      }),
+
+    // Verificar status da transação
+    checkStatus: publicProcedure
+      .input(z.object({ orderId: z.number() }))
+      .query(async ({ input }) => {
+        const transaction = await db.getPaymentTransactionByOrderId(input.orderId);
+        if (!transaction) {
+          return { status: 'not_found' };
+        }
+        return {
+          status: transaction.status,
+          paymentMethod: transaction.paymentMethod,
+          pixCode: transaction.pixCode,
+          pixExpiresAt: transaction.pixExpiresAt,
+        };
+      }),
+
+    // Webhook para receber notificações do gateway (será usado quando integrar)
+    webhook: publicProcedure
+      .input(z.object({
+        gatewayTransactionId: z.string(),
+        status: z.string(),
+        signature: z.string(), // Para validar autenticidade
+      }))
+      .mutation(async ({ input }) => {
+        // TODO: Validar assinatura do webhook
+        // TODO: Atualizar status da transação e do pedido
+        
+        // Por enquanto, apenas loga
+        console.log('[Payment Webhook]', input);
+        
+        return { received: true };
+      }),
+  }),
+
+  // ==================== SAVED CARDS ROUTES ====================
+  savedCards: router({
+    list: publicProcedure
+      .input(z.object({ customerId: z.number() }))
+      .query(async ({ input }) => {
+        return db.getSavedCardsByCustomer(input.customerId);
+      }),
+
+    // Salvar novo cartão (via gateway - tokenizado)
+    save: publicProcedure
+      .input(z.object({
+        customerId: z.number(),
+        gatewayCardId: z.string(), // Token do gateway
+        lastFourDigits: z.string().length(4),
+        brand: z.string(),
+        expirationMonth: z.number().min(1).max(12),
+        expirationYear: z.number().min(2024),
+        holderName: z.string(),
+        isDefault: z.boolean().default(false),
+      }))
+      .mutation(async ({ input }) => {
+        const id = await db.createSavedCard(input);
+        return { id };
+      }),
+
+    delete: publicProcedure
+      .input(z.object({ 
+        id: z.number(),
+        customerId: z.number(),
+      }))
+      .mutation(async ({ input }) => {
+        await db.deleteSavedCard(input.id, input.customerId);
+        return { success: true };
       }),
   }),
 });

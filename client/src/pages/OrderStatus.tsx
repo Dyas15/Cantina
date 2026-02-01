@@ -1,12 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useLocation, useParams } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { trpc } from "@/lib/trpc";
-import { ArrowLeft, Clock, ChefHat, CheckCircle, Package, XCircle, RefreshCw, Home } from "lucide-react";
+import { ArrowLeft, Clock, ChefHat, CheckCircle, Package, XCircle, RefreshCw, Home, Bell, BellOff } from "lucide-react";
 import { useRealtimeOrder } from "@/hooks/useRealtimeOrder";
 import { orderStatusLabels, paymentStatusLabels, paymentMethodLabels, getOrderStatusMessage, getPaymentStatusMessage } from "@/utils/statusLabels";
+import { 
+  notifyOrderReady, 
+  requestNotificationPermission, 
+  isNotificationEnabled,
+  initAudioContext 
+} from "@/lib/notifications";
+import { toast } from "sonner";
 
 const statusConfig = {
   aguardando_pagamento: {
@@ -22,7 +29,7 @@ const statusConfig = {
     step: 2,
   },
   pronto: {
-    label: "Pode Retirar",
+    label: "Pode Retirar!",
     icon: CheckCircle,
     color: "status-pronto",
     step: 3,
@@ -45,6 +52,9 @@ export default function OrderStatus() {
   const [, navigate] = useLocation();
   const params = useParams<{ id: string }>();
   const orderId = parseInt(params.id || "0");
+  const [notificationsEnabled, setNotificationsEnabled] = useState(isNotificationEnabled());
+  const hasNotifiedRef = useRef(false);
+  const previousStatusRef = useRef<string | null>(null);
 
   // Conecta ao sistema de tempo real para este pedido
   const { isConnected } = useRealtimeOrder(orderId);
@@ -53,20 +63,67 @@ export default function OrderStatus() {
     { id: orderId },
     { 
       enabled: orderId > 0,
-      // Não usa mais polling - tempo real via SSE
       refetchOnWindowFocus: true,
       refetchOnReconnect: true,
     }
   );
 
-  const [lastStatus, setLastStatus] = useState<string | null>(null);
-
+  // Inicializa o contexto de áudio na primeira interação
   useEffect(() => {
-    if (order && order.orderStatus !== lastStatus) {
-      setLastStatus(order.orderStatus);
-      // Poderia tocar um som ou vibrar quando o status mudar
+    const handleInteraction = () => {
+      initAudioContext();
+      document.removeEventListener('click', handleInteraction);
+      document.removeEventListener('touchstart', handleInteraction);
+    };
+
+    document.addEventListener('click', handleInteraction);
+    document.addEventListener('touchstart', handleInteraction);
+
+    return () => {
+      document.removeEventListener('click', handleInteraction);
+      document.removeEventListener('touchstart', handleInteraction);
+    };
+  }, []);
+
+  // Monitora mudanças de status e notifica quando ficar pronto
+  useEffect(() => {
+    if (order) {
+      const currentStatus = order.orderStatus;
+      const previousStatus = previousStatusRef.current;
+      
+      // Se o status mudou para "pronto" e ainda não notificamos
+      if (currentStatus === 'pronto' && previousStatus !== 'pronto' && !hasNotifiedRef.current) {
+        hasNotifiedRef.current = true;
+        notifyOrderReady(order.orderNumber);
+        toast.success('🎉 Seu pedido está pronto!', {
+          description: `Pedido #${order.orderNumber} pode ser retirado!`,
+          duration: 10000,
+        });
+      }
+      
+      previousStatusRef.current = currentStatus;
     }
-  }, [order?.orderStatus, lastStatus]);
+  }, [order?.orderStatus, order?.orderNumber]);
+
+  // Reset quando o pedido muda
+  useEffect(() => {
+    hasNotifiedRef.current = false;
+    previousStatusRef.current = null;
+  }, [orderId]);
+
+  const handleEnableNotifications = async () => {
+    const granted = await requestNotificationPermission();
+    setNotificationsEnabled(granted);
+    if (granted) {
+      toast.success('Notificações ativadas!', {
+        description: 'Você será avisado quando seu pedido ficar pronto.',
+      });
+    } else {
+      toast.error('Notificações bloqueadas', {
+        description: 'Permita notificações nas configurações do navegador.',
+      });
+    }
+  };
 
   if (isLoading) {
     return (
@@ -122,25 +179,69 @@ export default function OrderStatus() {
               <ArrowLeft className="h-6 w-6" />
             </Button>
             <h1 className="text-2xl font-bold">Pedido #{order.orderNumber}</h1>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => refetch()}
-              className="text-primary-foreground hover:bg-primary-foreground/10"
-            >
-              <RefreshCw className="h-5 w-5" />
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleEnableNotifications}
+                className="text-primary-foreground hover:bg-primary-foreground/10"
+                title={notificationsEnabled ? "Notificações ativadas" : "Ativar notificações"}
+              >
+                {notificationsEnabled ? (
+                  <Bell className="h-5 w-5" />
+                ) : (
+                  <BellOff className="h-5 w-5" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => refetch()}
+                className="text-primary-foreground hover:bg-primary-foreground/10"
+              >
+                <RefreshCw className="h-5 w-5" />
+              </Button>
+            </div>
           </div>
         </div>
       </header>
 
       <main className="container py-6 space-y-6">
+        {/* Notification Banner */}
+        {!notificationsEnabled && order.orderStatus !== 'entregue' && order.orderStatus !== 'cancelado' && (
+          <Card className="bg-yellow-50 border-yellow-200">
+            <CardContent className="py-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <BellOff className="h-6 w-6 text-yellow-600" />
+                  <p className="text-sm text-yellow-800">
+                    Ative as notificações para ser avisado quando seu pedido ficar pronto!
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleEnableNotifications}
+                  className="shrink-0 border-yellow-400 text-yellow-800 hover:bg-yellow-100"
+                >
+                  Ativar
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* Status Card */}
         <Card className="overflow-hidden card-accessible">
-          <div className={`${status.color} p-8 text-center`}>
+          <div className={`${status.color} p-8 text-center ${order.orderStatus === 'pronto' ? 'animate-pulse' : ''}`}>
             <StatusIcon className="h-20 w-20 mx-auto mb-4" />
             <h2 className="text-3xl font-bold mb-2">{status.label}</h2>
             <p className="text-xl opacity-90">{getOrderStatusMessage(order.orderStatus)}</p>
+            {order.orderStatus === 'pronto' && (
+              <p className="text-lg mt-4 font-semibold animate-bounce">
+                🎉 Vá retirar seu pedido! 🎉
+              </p>
+            )}
           </div>
           <CardContent className="pt-8">
             {/* Progress Steps */}

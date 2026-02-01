@@ -14,11 +14,38 @@ interface PixData {
 
 /**
  * Gera o payload Pix no formato EMVCo
+ * @param pixKey - Chave PIX do recebedor
+ * @param customerName - Nome do cliente (para descrição)
+ * @param merchantName - Nome do estabelecimento
+ * @param amount - Valor do pagamento (string ou number)
+ * @param merchantCity - Cidade do estabelecimento (padrão: "SAO PAULO")
  */
-export function generatePixPayload(data: PixData): string {
+export async function generatePixPayload(
+  pixKey: string,
+  customerName: string,
+  merchantName: string,
+  amount: string | number,
+  merchantCity: string = "SAO PAULO"
+): Promise<string> {
+  const numericAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
+  
+  const data: PixData = {
+    pixKey,
+    description: `Pedido - ${customerName}`,
+    merchantName: merchantName.substring(0, 25), // Limite de 25 caracteres
+    merchantCity: merchantCity.substring(0, 15), // Limite de 15 caracteres
+    amount: numericAmount,
+  };
+
+  return generatePixPayloadInternal(data);
+}
+
+/**
+ * Gera o payload Pix no formato EMVCo (implementação interna)
+ */
+function generatePixPayloadInternal(data: PixData): string {
   const {
     pixKey,
-    description,
     merchantName,
     merchantCity,
     amount,
@@ -51,18 +78,22 @@ export function generatePixPayload(data: PixData): string {
   const countryCode = "5802BR";
 
   // Merchant Name (59)
-  const merchantNameLength = merchantName.length.toString().padStart(2, "0");
-  const merchantNameData = `59${merchantNameLength}${merchantName}`;
+  const cleanMerchantName = merchantName.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+  const merchantNameLength = cleanMerchantName.length.toString().padStart(2, "0");
+  const merchantNameData = `59${merchantNameLength}${cleanMerchantName}`;
 
   // Merchant City (60)
-  const merchantCityLength = merchantCity.length.toString().padStart(2, "0");
-  const merchantCityData = `60${merchantCityLength}${merchantCity}`;
+  const cleanMerchantCity = merchantCity.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+  const merchantCityLength = cleanMerchantCity.length.toString().padStart(2, "0");
+  const merchantCityData = `60${merchantCityLength}${cleanMerchantCity}`;
 
   // Additional Data Field Template (62)
   // Transaction ID (05) - ID único da transação
   const txId = transactionId || generateTransactionId();
   const txIdLength = txId.length.toString().padStart(2, "0");
-  const additionalData = `6207${txIdLength}05${txIdLength}${txId}`;
+  const additionalDataContent = `05${txIdLength}${txId}`;
+  const additionalDataLength = additionalDataContent.length.toString().padStart(2, "0");
+  const additionalData = `62${additionalDataLength}${additionalDataContent}`;
 
   // CRC16 (63) - será calculado depois
   const crcPlaceholder = "6304";
@@ -85,14 +116,14 @@ export function generatePixPayload(data: PixData): string {
   const crcHex = crc.toString(16).toUpperCase().padStart(4, "0");
 
   // Retorna o payload completo
-  return payloadWithoutCrc.replace(crcPlaceholder, `6304${crcHex}`);
+  return payloadWithoutCrc + crcHex;
 }
 
 /**
  * Gera um ID único para a transação
  */
 function generateTransactionId(): string {
-  return `CANTINA${Date.now()}${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
+  return `CANT${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
 }
 
 /**
@@ -115,7 +146,7 @@ function calculateCRC16(data: string): number {
   }
 
   crc &= 0xffff;
-  return crc ^ 0xffff;
+  return crc;
 }
 
 /**

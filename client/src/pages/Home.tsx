@@ -4,22 +4,41 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { Store, Phone, User, ArrowRight, Shield, Clock, CreditCard, Utensils } from "lucide-react";
+import { Store, Phone, User, ArrowRight, Shield, Clock, CreditCard, Utensils, AlertTriangle, LogIn } from "lucide-react";
+
+interface SavedCustomer {
+  id: number;
+  name: string;
+  phone: string;
+  totalSpent?: string;
+  totalDebt?: string;
+}
 
 export default function Home() {
   const [, navigate] = useLocation();
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
+  const [savedCustomer, setSavedCustomer] = useState<SavedCustomer | null>(null);
+  const [showExistingSessionDialog, setShowExistingSessionDialog] = useState(false);
 
   // Verifica se já tem cliente salvo no localStorage
   useEffect(() => {
-    const savedCustomer = localStorage.getItem("cantina_customer");
-    if (savedCustomer) {
-      navigate("/cardapio");
+    const saved = localStorage.getItem("cantina_customer");
+    if (saved) {
+      try {
+        const customer = JSON.parse(saved) as SavedCustomer;
+        setSavedCustomer(customer);
+        // Mostra dialog perguntando se quer continuar como o usuário salvo
+        setShowExistingSessionDialog(true);
+      } catch (e) {
+        // Se der erro no parse, limpa o localStorage
+        localStorage.removeItem("cantina_customer");
+      }
     }
-  }, [navigate]);
+  }, []);
 
   const identifyMutation = trpc.customer.identify.useMutation({
     onSuccess: (customer) => {
@@ -56,8 +75,74 @@ export default function Home() {
     identifyMutation.mutate({ name: name.trim(), phone });
   };
 
+  // Continua com a sessão existente
+  const handleContinueSession = () => {
+    setShowExistingSessionDialog(false);
+    navigate("/cardapio");
+  };
+
+  // Inicia nova sessão (logout do anterior)
+  const handleNewSession = () => {
+    localStorage.removeItem("cantina_customer");
+    localStorage.removeItem("cantina_cart");
+    setSavedCustomer(null);
+    setShowExistingSessionDialog(false);
+    toast.info("Sessão anterior encerrada. Faça login novamente.");
+  };
+
   return (
     <div className="min-h-screen min-h-[100dvh] bg-gradient-to-b from-primary/10 via-background to-background">
+      {/* Dialog de sessão existente */}
+      <Dialog open={showExistingSessionDialog} onOpenChange={setShowExistingSessionDialog}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-xl">
+              <LogIn className="h-6 w-6 text-primary" />
+              Sessão Ativa Encontrada
+            </DialogTitle>
+            <DialogDescription className="text-base pt-2">
+              Você já está logado como:
+            </DialogDescription>
+          </DialogHeader>
+          
+          <div className="bg-primary/5 rounded-xl p-4 my-4">
+            <p className="text-lg font-semibold text-foreground">{savedCustomer?.name}</p>
+            <p className="text-muted-foreground">{savedCustomer?.phone}</p>
+          </div>
+
+          <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 mb-4">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-yellow-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm text-yellow-800 font-medium">
+                  Deseja continuar com esta conta?
+                </p>
+                <p className="text-xs text-yellow-700 mt-1">
+                  Se você fizer um novo login com dados diferentes, uma nova conta pode ser criada.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter className="flex flex-col gap-2 sm:flex-row">
+            <Button
+              variant="outline"
+              onClick={handleNewSession}
+              className="w-full sm:w-auto order-2 sm:order-1"
+            >
+              Usar Outra Conta
+            </Button>
+            <Button
+              onClick={handleContinueSession}
+              className="w-full sm:w-auto order-1 sm:order-2 bg-primary"
+            >
+              <ArrowRight className="h-4 w-4 mr-2" />
+              Continuar como {savedCustomer?.name?.split(' ')[0]}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Header - Mobile First */}
       <header className="header-main">
         <div className="container">

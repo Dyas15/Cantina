@@ -38,6 +38,9 @@ export function useRealtimeOrders() {
         console.log("[SSE] Novo pedido criado:", data);
         // Invalida cache para buscar novos dados
         utils.order.list.invalidate();
+        utils.customer.getHistory.invalidate();
+        utils.customer.getPendingOrders.invalidate();
+        utils.customer.getDebts.invalidate();
       } catch (error) {
         console.error("[SSE] Erro ao processar order_created:", error);
       }
@@ -50,6 +53,9 @@ export function useRealtimeOrders() {
         console.log("[SSE] Pedido atualizado:", data);
         // Invalida cache para buscar dados atualizados
         utils.order.list.invalidate();
+        utils.customer.getHistory.invalidate();
+        utils.customer.getPendingOrders.invalidate();
+        utils.customer.getDebts.invalidate();
       } catch (error) {
         console.error("[SSE] Erro ao processar order_updated:", error);
       }
@@ -62,6 +68,9 @@ export function useRealtimeOrders() {
         console.log("[SSE] Status do pedido mudou:", data);
         // Invalida cache
         utils.order.list.invalidate();
+        utils.customer.getHistory.invalidate();
+        utils.customer.getPendingOrders.invalidate();
+        utils.customer.getDebts.invalidate();
       } catch (error) {
         console.error("[SSE] Erro ao processar order_status_changed:", error);
       }
@@ -74,6 +83,9 @@ export function useRealtimeOrders() {
         console.log("[SSE] Status de pagamento mudou:", data);
         // Invalida cache
         utils.order.list.invalidate();
+        utils.customer.getHistory.invalidate();
+        utils.customer.getPendingOrders.invalidate();
+        utils.customer.getDebts.invalidate();
       } catch (error) {
         console.error("[SSE] Erro ao processar payment_status_changed:", error);
       }

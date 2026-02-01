@@ -1,24 +1,26 @@
-import { eq, and, desc, asc, ilike, sql, gte, lte, or } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
+import { eq, and, desc, asc, like, sql, gte, lte, or } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/mysql2";
+import mysql from "mysql2/promise";
 import { 
   InsertUser, users, 
   customers, InsertCustomer, Customer,
   products, InsertProduct, Product,
   orders, InsertOrder, Order,
   orderItems, InsertOrderItem, OrderItem,
-  debts, InsertDebt, Debt
+  debts, InsertDebt, Debt,
+  expenses, InsertExpense, Expense,
+  savedCards, InsertSavedCard, SavedCard,
+  paymentTransactions, InsertPaymentTransaction, PaymentTransaction
 } from "../drizzle/schema";
 import { createLogger, logDbConnection, logQuery, logQueryError } from "./_core/logger";
 
 const logger = createLogger('Database');
 
-let _db: ReturnType<typeof drizzle> | null = null;
-let _client: ReturnType<typeof postgres> | null = null;
+let _db: any = null;
+let _pool: mysql.Pool | null = null;
 
 /**
- * Obtém a instância do banco de dados
- * Configura SSL automaticamente para ambientes de produção (Render, Railway, etc.)
+ * Obtém a instância do banco de dados MySQL
  */
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
@@ -26,58 +28,30 @@ export async function getDb() {
       const databaseUrl = process.env.DATABASE_URL;
       
       // Log da tentativa de conexão (sem expor credenciais)
-      const urlParts = databaseUrl.match(/^postgres(ql)?:\/\/([^:]+):[^@]+@([^:\/]+)/);
-      const safeUrl = urlParts ? `postgres://${urlParts[2]}:***@${urlParts[3]}` : 'postgres://***';
+      const urlParts = databaseUrl.match(/^mysql:\/\/([^:]+):[^@]+@([^:\/]+)/);
+      const safeUrl = urlParts ? `mysql://${urlParts[1]}:***@${urlParts[2]}` : 'mysql://***';
       
       logDbConnection('connecting', { 
         url: safeUrl,
-        nodeEnv: process.env.NODE_ENV,
-        hasSSL: databaseUrl.includes('ssl') || databaseUrl.includes('sslmode')
+        nodeEnv: process.env.NODE_ENV
       });
 
-      // Configuração do cliente postgres
-      const isProduction = process.env.NODE_ENV === 'production';
-      const hasSSLInUrl = databaseUrl.includes('ssl') || databaseUrl.includes('sslmode');
-      
-      const clientOptions: postgres.Options<{}> = {
-        // --- CORREÇÃO CRÍTICA AQUI ---
-        // Desativa prepared statements para compatibilidade com Supabase Transaction Mode (porta 6543)
-        prepare: false, 
-        // -----------------------------
+      // Cria pool de conexões MySQL
+      _pool = mysql.createPool({
+        uri: databaseUrl,
+        waitForConnections: true,
+        connectionLimit: 10,
+        queueLimit: 0,
+        enableKeepAlive: true,
+        keepAliveInitialDelay: 0
+      });
 
-        // Configurações de conexão
-        max: 10, // Máximo de conexões no pool
-        idle_timeout: 20, // Timeout de conexão ociosa em segundos
-        connect_timeout: 30, // Timeout de conexão em segundos
-        
-        // Callbacks para logging
-        onnotice: (notice) => {
-          logger.debug('PostgreSQL Notice', { notice });
-        },
-        
-        // Debug de queries (apenas em desenvolvimento)
-        debug: process.env.LOG_LEVEL === 'debug' ? (connection, query, params) => {
-          logQuery(query, params as unknown[]);
-        } : undefined,
-      };
-
-      // Configuração SSL para produção
-      // Se a URL já tiver ?sslmode=require, isso não é estritamente necessário, mas serve de fallback
-      if (isProduction && !hasSSLInUrl) {
-        logger.info('Produção detectada: habilitando SSL para conexão com banco de dados');
-        (clientOptions as any).ssl = { rejectUnauthorized: false };
-      }
-
-      _client = postgres(databaseUrl, clientOptions);
-      _db = drizzle(_client);
+      _db = drizzle(_pool);
       
       // Testa a conexão
       try {
         await _db.execute(sql`SELECT 1 as test`);
-        logDbConnection('connected', { 
-          url: safeUrl,
-          ssl: isProduction && !hasSSLInUrl ? 'enabled (auto)' : 'from url'
-        });
+        logDbConnection('connected', { url: safeUrl });
       } catch (testError) {
         logger.error('Teste de conexão falhou', { url: safeUrl }, testError as Error);
         throw testError;
@@ -91,7 +65,7 @@ export async function getDb() {
       });
       logger.error('Falha ao conectar ao banco de dados', undefined, error as Error);
       _db = null;
-      _client = null;
+      _pool = null;
     }
   }
   return _db;
@@ -138,45 +112,31 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   }
 
   return executeWithLogging('upsertUser', async () => {
-    const values: InsertUser = {
-      openId: user.openId,
-    };
-    const updateSet: Record<string, unknown> = {};
-
-    const textFields = ["name", "email", "loginMethod"] as const;
-    type TextField = (typeof textFields)[number];
-
-    const assignNullable = (field: TextField) => {
-      const value = user[field];
-      if (value === undefined) return;
-      const normalized = value ?? null;
-      values[field] = normalized;
-      updateSet[field] = normalized;
-    };
-
-    textFields.forEach(assignNullable);
-
-    if (user.lastSignedIn !== undefined) {
-      values.lastSignedIn = user.lastSignedIn;
-      updateSet.lastSignedIn = user.lastSignedIn;
+    const existing = await db.select().from(users).where(eq(users.openId, user.openId)).limit(1);
+    
+    if (existing.length > 0) {
+      // Update
+      const updateSet: Record<string, unknown> = {};
+      if (user.name !== undefined) updateSet.name = user.name;
+      if (user.email !== undefined) updateSet.email = user.email;
+      if (user.loginMethod !== undefined) updateSet.loginMethod = user.loginMethod;
+      if (user.lastSignedIn !== undefined) updateSet.lastSignedIn = user.lastSignedIn;
+      if (user.role !== undefined) updateSet.role = user.role;
+      
+      if (Object.keys(updateSet).length > 0) {
+        await db.update(users).set(updateSet).where(eq(users.openId, user.openId));
+      }
+    } else {
+      // Insert
+      await db.insert(users).values({
+        openId: user.openId,
+        name: user.name ?? null,
+        email: user.email ?? null,
+        loginMethod: user.loginMethod ?? null,
+        role: user.role ?? 'user',
+        lastSignedIn: user.lastSignedIn ?? new Date(),
+      });
     }
-    if (user.role !== undefined) {
-      values.role = user.role;
-      updateSet.role = user.role;
-    }
-
-    if (!values.lastSignedIn) {
-      values.lastSignedIn = new Date();
-    }
-
-    if (Object.keys(updateSet).length === 0) {
-      updateSet.lastSignedIn = new Date();
-    }
-
-    await db.insert(users).values(values).onConflictDoUpdate({
-      target: users.openId,
-      set: updateSet,
-    });
   }, `upsert user ${user.openId}`);
 }
 
@@ -231,10 +191,11 @@ export async function createAdminUser(email: string, passwordHash: string, name:
       loginMethod: 'password',
       role: 'admin',
       lastSignedIn: new Date(),
-    }).returning({ id: users.id });
+    });
 
-    logger.info('Admin user created', { email, id: result[0].id });
-    return result[0].id;
+    const insertId = (result as any)[0]?.insertId;
+    logger.info('Admin user created', { email, id: insertId });
+    return insertId;
   }, `create admin user ${email}`);
 }
 
@@ -264,10 +225,15 @@ export async function findOrCreateCustomer(name: string, phone: string): Promise
     const result = await db.insert(customers).values({
       name: name.trim(),
       phone: normalizedPhone,
-    }).returning();
+    });
 
-    logger.info('New customer created', { id: result[0].id, name: result[0].name, phone: normalizedPhone });
-    return result[0];
+    const insertId = (result as any)[0]?.insertId;
+    
+    // Busca o cliente recém criado
+    const newCustomer = await db.select().from(customers).where(eq(customers.id, insertId)).limit(1);
+    
+    logger.info('New customer created', { id: insertId, name: name.trim(), phone: normalizedPhone });
+    return newCustomer[0];
   }, `find or create customer ${normalizedPhone}`);
 }
 
@@ -288,20 +254,57 @@ export async function searchCustomers(query: string): Promise<Customer[]> {
   return executeWithLogging('searchCustomers', async () => {
     return db.select().from(customers)
       .where(or(
-        ilike(customers.name, `%${query}%`),
-        ilike(customers.phone, `%${query}%`)
+        like(customers.name, `%${query}%`),
+        like(customers.phone, `%${query}%`)
       ))
       .orderBy(desc(customers.updatedAt))
       .limit(20);
   }, `search customers ${query}`);
 }
 
-export async function getAllCustomers(): Promise<Customer[]> {
+export async function getAllCustomers(): Promise<(Customer & { calculatedDebt: number, calculatedPendingPayments: number })[]> {
   const db = await getDb();
   if (!db) return [];
 
   return executeWithLogging('getAllCustomers', async () => {
-    return db.select().from(customers).orderBy(desc(customers.createdAt));
+    const allCustomers = await db.select().from(customers).orderBy(desc(customers.createdAt));
+    
+    // Para cada cliente, calcula a dívida real (fiado não pago + pedidos pendentes)
+    const customersWithCalculatedDebt = await Promise.all(
+      allCustomers.map(async (customer) => {
+        // Dívidas da tabela debts (fiado não pago)
+        const debtResult = await db.select({
+          total: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
+        }).from(debts)
+          .where(and(
+            eq(debts.customerId, customer.id),
+            eq(debts.isPaid, false)
+          ));
+        const calculatedDebt = Number(debtResult[0]?.total || 0);
+
+        // Pedidos com pagamento pendente (qualquer método, exceto fiado que já está em debts)
+        const pendingResult = await db.select({
+          total: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+        }).from(orders)
+          .where(and(
+            eq(orders.customerId, customer.id),
+            eq(orders.paymentStatus, 'pendente'),
+            sql`${orders.orderStatus} != 'cancelado'`,
+            sql`${orders.paymentMethod} != 'fiado'`
+          ));
+        const calculatedPendingPayments = Number(pendingResult[0]?.total || 0);
+
+        return {
+          ...customer,
+          calculatedDebt,
+          calculatedPendingPayments,
+          // Atualiza o totalDebt para refletir a dívida real
+          totalDebt: (calculatedDebt + calculatedPendingPayments).toFixed(2),
+        };
+      })
+    );
+
+    return customersWithCalculatedDebt;
   }, 'get all customers');
 }
 
@@ -312,8 +315,8 @@ export async function updateCustomerTotals(customerId: number, amountSpent: numb
   return executeWithLogging('updateCustomerTotals', async () => {
     await db.update(customers)
       .set({
-        totalSpent: sql`${customers.totalSpent}::numeric + ${amountSpent}`,
-        totalDebt: sql`${customers.totalDebt}::numeric + ${amountDebt}`,
+        totalSpent: sql`${customers.totalSpent} + ${amountSpent}`,
+        totalDebt: sql`${customers.totalDebt} + ${amountDebt}`,
       })
       .where(eq(customers.id, customerId));
   }, `update customer totals ${customerId}`);
@@ -327,7 +330,7 @@ export async function recalculateCustomerDebt(customerId: number): Promise<void>
   return executeWithLogging('recalculateCustomerDebt', async () => {
     // Calcula o total de dívidas não pagas
     const result = await db.select({
-      total: sql<string>`COALESCE(SUM(${debts.amount}::numeric), 0)`,
+      total: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
     }).from(debts)
       .where(and(
         eq(debts.customerId, customerId),
@@ -352,9 +355,10 @@ export async function createProduct(product: InsertProduct): Promise<number> {
   if (!db) throw new Error("Database not available");
 
   return executeWithLogging('createProduct', async () => {
-    const result = await db.insert(products).values(product).returning({ id: products.id });
-    logger.info('Product created', { id: result[0].id, name: product.name });
-    return result[0].id;
+    const result = await db.insert(products).values(product);
+    const insertId = (result as any)[0]?.insertId;
+    logger.info('Product created', { id: insertId, name: product.name });
+    return insertId;
   }, `create product ${product.name}`);
 }
 
@@ -445,9 +449,9 @@ export async function createOrder(order: Omit<InsertOrder, 'orderNumber'>, items
       ...order,
       orderNumber,
       paymentStatus: 'pendente',
-    }).returning({ id: orders.id });
+    });
     
-    const orderId = result[0].id;
+    const orderId = (result as any)[0]?.insertId;
 
     // Insere os itens do pedido
     if (items.length > 0) {
@@ -520,8 +524,7 @@ export async function getAllOrders(filters?: {
   if (!db) return [];
 
   return executeWithLogging('getAllOrders', async () => {
-    let query = db.select().from(orders);
-    const conditions = [];
+    const conditions: any[] = [];
 
     if (filters?.startDate) {
       conditions.push(gte(orders.createdAt, filters.startDate));
@@ -534,10 +537,10 @@ export async function getAllOrders(filters?: {
     }
 
     if (conditions.length > 0) {
-      query = query.where(and(...conditions));
+      return db.select().from(orders).where(and(...conditions)).orderBy(desc(orders.createdAt));
     }
 
-    return query.orderBy(desc(orders.createdAt));
+    return db.select().from(orders).orderBy(desc(orders.createdAt));
   }, `get all orders`);
 }
 
@@ -572,8 +575,8 @@ export async function getPendingOrders(): Promise<(Order & { customer: Customer,
     const orderResults = await db.select().from(orders)
       .where(and(
         or(
-          eq(orders.orderStatus, 'pendente'),
-          eq(orders.orderStatus, 'preparando')
+          eq(orders.orderStatus, 'aguardando_pagamento'),
+          eq(orders.orderStatus, 'em_preparo')
         ),
         sql`${orders.orderStatus} != 'cancelado'`
       ))
@@ -591,12 +594,40 @@ export async function getPendingOrders(): Promise<(Order & { customer: Customer,
   }, 'get pending orders');
 }
 
+// Busca pedidos não entregues de um cliente específico
+export async function getCustomerPendingOrders(customerId: number): Promise<(Order & { items: OrderItem[] })[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  return executeWithLogging('getCustomerPendingOrders', async () => {
+    const orderResults = await db.select().from(orders)
+      .where(and(
+        eq(orders.customerId, customerId),
+        or(
+          eq(orders.orderStatus, 'aguardando_pagamento'),
+          eq(orders.orderStatus, 'em_preparo'),
+          eq(orders.orderStatus, 'pronto')
+        )
+      ))
+      .orderBy(desc(orders.createdAt));
+
+    const ordersWithItems = await Promise.all(
+      orderResults.map(async (order) => {
+        const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
+        return { ...order, items };
+      })
+    );
+
+    return ordersWithItems;
+  }, `get customer pending orders ${customerId}`);
+}
+
 export async function updateOrderStatus(orderId: number, status: string): Promise<void> {
   const db = await getDb();
   if (!db) return;
 
   return executeWithLogging('updateOrderStatus', async () => {
-    await db.update(orders).set({ orderStatus: status }).where(eq(orders.id, orderId));
+    await db.update(orders).set({ orderStatus: status as any }).where(eq(orders.id, orderId));
     logger.info('Order status updated', { orderId, status });
   }, `update order status ${orderId} to ${status}`);
 }
@@ -606,7 +637,20 @@ export async function updatePaymentStatus(orderId: number, status: string): Prom
   if (!db) return;
 
   return executeWithLogging('updatePaymentStatus', async () => {
-    await db.update(orders).set({ paymentStatus: status }).where(eq(orders.id, orderId));
+    await db.update(orders).set({ paymentStatus: status as any }).where(eq(orders.id, orderId));
+    
+    // Se o pagamento foi confirmado, atualiza o totalSpent do cliente
+    if (status === 'pago') {
+      const order = await getOrderById(orderId);
+      if (order) {
+        await db.update(customers)
+          .set({
+            totalSpent: sql`${customers.totalSpent} + ${order.totalAmount}`,
+          })
+          .where(eq(customers.id, order.customerId));
+      }
+    }
+    
     logger.info('Payment status updated', { orderId, status });
   }, `update payment status ${orderId} to ${status}`);
 }
@@ -662,11 +706,9 @@ export async function getAllDebts(onlyUnpaid = true): Promise<(Debt & { customer
   if (!db) return [];
 
   return executeWithLogging('getAllDebts', async () => {
-    let query = db.select().from(debts);
-    
     const debtResults = onlyUnpaid
-      ? await query.where(eq(debts.isPaid, false)).orderBy(desc(debts.createdAt))
-      : await query.orderBy(desc(debts.createdAt));
+      ? await db.select().from(debts).where(eq(debts.isPaid, false)).orderBy(desc(debts.createdAt))
+      : await db.select().from(debts).orderBy(desc(debts.createdAt));
 
     const debtsWithDetails = await Promise.all(
       debtResults.map(async (debt) => {
@@ -701,17 +743,17 @@ export async function markDebtAsPaid(debtId: number): Promise<void> {
     // Atualiza o status do pagamento do pedido
     await db.update(orders).set({ paymentStatus: 'pago' }).where(eq(orders.id, debt.orderId));
 
-    // Atualiza totais do cliente
+    // Atualiza totais do cliente - subtrai da dívida e adiciona ao gasto
     await db.update(customers)
       .set({
-        totalDebt: sql`GREATEST(${customers.totalDebt}::numeric - ${debt.amount}::numeric, 0)`,
-        totalSpent: sql`${customers.totalSpent}::numeric + ${debt.amount}::numeric`,
+        totalDebt: sql`GREATEST(${customers.totalDebt} - ${debt.amount}, 0)`,
+        totalSpent: sql`${customers.totalSpent} + ${debt.amount}`,
       })
       .where(eq(customers.id, debt.customerId));
     
     logger.info('Debt marked as paid', { debtId, orderId: debt.orderId, customerId: debt.customerId });
     
-    // Emite evento de atualização (será importado dinamicamente para evitar dependência circular)
+    // Emite evento de atualização
     try {
       const { emitPaymentStatusChanged, emitOrderUpdated } = await import("./_core/events");
       emitPaymentStatusChanged(debt.orderId, 'pago');
@@ -725,7 +767,7 @@ export async function markDebtAsPaid(debtId: number): Promise<void> {
   }, `mark debt as paid ${debtId}`);
 }
 
-// ==================== EXPENSE QUERIES (GESTÃO FINANCEIRA) ====================
+// ==================== EXPENSE QUERIES ====================
 
 export async function createExpense(expense: {
   description: string;
@@ -738,16 +780,15 @@ export async function createExpense(expense: {
   if (!db) throw new Error("Database not available");
 
   return executeWithLogging('createExpense', async () => {
-    const notesValue = expense.notes || null;
+    const result = await db.insert(expenses).values({
+      description: expense.description,
+      amount: expense.amount,
+      category: expense.category,
+      date: expense.date,
+      notes: expense.notes || null,
+    });
 
-    // Usando SQL direto já que a tabela pode não existir no schema ainda
-    const result = await db.execute(sql`
-      INSERT INTO expenses (description, amount, category, date, notes, created_at, updated_at)
-      VALUES (${expense.description}, ${expense.amount}, ${expense.category}, ${expense.date}, ${notesValue}, NOW(), NOW())
-      RETURNING id
-    `);
-
-    const id = Number((result as any)[0]?.id);
+    const id = (result as any)[0]?.insertId;
     logger.info('Expense created', { id, description: expense.description, amount: expense.amount });
     return id;
   }, `create expense ${expense.description}`);
@@ -757,37 +798,28 @@ export async function getAllExpenses(filters?: {
   startDate?: Date;
   endDate?: Date;
   category?: string;
-}): Promise<any[]> {
+}): Promise<Expense[]> {
   const db = await getDb();
   if (!db) return [];
 
   return executeWithLogging('getAllExpenses', async () => {
-    try {
-      let conditions = [];
-      
-      if (filters?.startDate) {
-        conditions.push(sql`date >= ${filters.startDate}`);
-      }
-      if (filters?.endDate) {
-        conditions.push(sql`date <= ${filters.endDate}`);
-      }
-      if (filters?.category) {
-        conditions.push(sql`category = ${filters.category}`);
-      }
-
-      const whereClause = conditions.length > 0 
-        ? sql`WHERE ${sql.join(conditions, sql` AND `)}` 
-        : sql``;
-
-      const result = await db.execute(sql`
-        SELECT * FROM expenses ${whereClause} ORDER BY date DESC
-      `);
-      
-      return result as any[];
-    } catch {
-      // Tabela pode não existir ainda
-      return [];
+    const conditions: any[] = [];
+    
+    if (filters?.startDate) {
+      conditions.push(gte(expenses.date, filters.startDate));
     }
+    if (filters?.endDate) {
+      conditions.push(lte(expenses.date, filters.endDate));
+    }
+    if (filters?.category) {
+      conditions.push(eq(expenses.category, filters.category));
+    }
+
+    if (conditions.length > 0) {
+      return db.select().from(expenses).where(and(...conditions)).orderBy(desc(expenses.date));
+    }
+    
+    return db.select().from(expenses).orderBy(desc(expenses.date));
   }, 'get all expenses');
 }
 
@@ -796,7 +828,7 @@ export async function deleteExpense(id: number): Promise<void> {
   if (!db) return;
 
   return executeWithLogging('deleteExpense', async () => {
-    await db.execute(sql`DELETE FROM expenses WHERE id = ${id}`);
+    await db.delete(expenses).where(eq(expenses.id, id));
     logger.info('Expense deleted', { id });
   }, `delete expense ${id}`);
 }
@@ -808,7 +840,7 @@ export async function getFinancialSummary(startDate: Date, endDate: Date) {
   return executeWithLogging('getFinancialSummary', async () => {
     // Total de vendas (pedidos não cancelados)
     const salesResult = await db.select({
-      totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
+      totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
     }).from(orders)
       .where(and(
         gte(orders.createdAt, startDate),
@@ -818,7 +850,7 @@ export async function getFinancialSummary(startDate: Date, endDate: Date) {
 
     // Total recebido (pagos)
     const receivedResult = await db.select({
-      totalReceived: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
+      totalReceived: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
     }).from(orders)
       .where(and(
         gte(orders.createdAt, startDate),
@@ -827,20 +859,19 @@ export async function getFinancialSummary(startDate: Date, endDate: Date) {
       ));
 
     // Total de despesas
-    let totalExpenses = 0;
-    try {
-      const expensesResult = await db.execute(sql`
-        SELECT COALESCE(SUM(amount::numeric), 0) as total FROM expenses 
-        WHERE date >= ${startDate} AND date <= ${endDate}
-      `);
-      totalExpenses = Number((expensesResult as any)[0]?.total || 0);
-    } catch {
-      // Tabela pode não existir
-    }
+    const expensesResult = await db.select({
+      total: sql<string>`COALESCE(SUM(${expenses.amount}), 0)`,
+    }).from(expenses)
+      .where(and(
+        gte(expenses.date, startDate),
+        lte(expenses.date, endDate)
+      ));
+    
+    const totalExpenses = Number(expensesResult[0]?.total || 0);
 
     // Total a receber (fiado não pago)
     const pendingResult = await db.select({
-      totalPending: sql<string>`COALESCE(SUM(${debts.amount}::numeric), 0)`,
+      totalPending: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
     }).from(debts)
       .where(and(
         gte(debts.createdAt, startDate),
@@ -874,7 +905,7 @@ export async function getSalesReport(startDate: Date, endDate: Date) {
   return executeWithLogging('getSalesReport', async () => {
     // Total vendido
     const totalSales = await db.select({
-      total: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
+      total: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
       count: sql<number>`COUNT(*)`,
     }).from(orders)
       .where(and(
@@ -885,7 +916,7 @@ export async function getSalesReport(startDate: Date, endDate: Date) {
 
     // Total recebido (pagos)
     const totalReceived = await db.select({
-      total: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
+      total: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
     }).from(orders)
       .where(and(
         gte(orders.createdAt, startDate),
@@ -895,7 +926,7 @@ export async function getSalesReport(startDate: Date, endDate: Date) {
 
     // Total a receber (fiado não pago)
     const totalPending = await db.select({
-      total: sql<string>`COALESCE(SUM(${debts.amount}::numeric), 0)`,
+      total: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
     }).from(debts)
       .where(and(
         gte(debts.createdAt, startDate),
@@ -921,7 +952,7 @@ export async function getTopProducts(startDate: Date, endDate: Date, limit = 10)
       productId: orderItems.productId,
       productName: orderItems.productName,
       totalQuantity: sql<number>`SUM(${orderItems.quantity})`,
-      totalRevenue: sql<string>`SUM(${orderItems.subtotal}::numeric)`,
+      totalRevenue: sql<string>`SUM(${orderItems.subtotal})`,
     }).from(orderItems)
       .innerJoin(orders, eq(orderItems.orderId, orders.id))
       .where(and(
@@ -944,7 +975,7 @@ export async function getTopCustomers(startDate: Date, endDate: Date, limit = 10
   return executeWithLogging('getTopCustomers', async () => {
     const result = await db.select({
       customerId: orders.customerId,
-      totalSpent: sql<string>`SUM(${orders.totalAmount}::numeric)`,
+      totalSpent: sql<string>`SUM(${orders.totalAmount})`,
       orderCount: sql<number>`COUNT(*)`,
     }).from(orders)
       .where(and(
@@ -953,7 +984,7 @@ export async function getTopCustomers(startDate: Date, endDate: Date, limit = 10
         sql`${orders.orderStatus} != 'cancelado'`
       ))
       .groupBy(orders.customerId)
-      .orderBy(desc(sql`SUM(${orders.totalAmount}::numeric)`))
+      .orderBy(desc(sql`SUM(${orders.totalAmount})`))
       .limit(limit);
 
     // Busca dados dos clientes
@@ -976,10 +1007,29 @@ export async function getTopDebtors(limit = 10) {
   if (!db) return [];
 
   return executeWithLogging('getTopDebtors', async () => {
-    return db.select().from(customers)
-      .where(sql`${customers.totalDebt}::numeric > 0`)
-      .orderBy(desc(customers.totalDebt))
+    // Busca clientes com dívidas não pagas (calculado dinamicamente)
+    const debtorsResult = await db.select({
+      customerId: debts.customerId,
+      totalDebt: sql<string>`SUM(${debts.amount})`,
+    }).from(debts)
+      .where(eq(debts.isPaid, false))
+      .groupBy(debts.customerId)
+      .having(sql`SUM(${debts.amount}) > 0`)
+      .orderBy(desc(sql`SUM(${debts.amount})`))
       .limit(limit);
+
+    // Busca dados dos clientes
+    const debtorsWithDetails = await Promise.all(
+      debtorsResult.map(async (item) => {
+        const customer = await getCustomerById(item.customerId);
+        return {
+          ...customer!,
+          totalDebt: item.totalDebt,
+        };
+      })
+    );
+
+    return debtorsWithDetails;
   }, `get top debtors limit ${limit}`);
 }
 
@@ -998,13 +1048,13 @@ export async function getSalesByPeriod(startDate: Date, endDate: Date, groupBy: 
   if (!db) return [];
 
   return executeWithLogging('getSalesByPeriod', async () => {
-    const dateFormat = groupBy === 'day' ? 'YYYY-MM-DD' 
-      : groupBy === 'week' ? 'IYYY-IW' 
-      : 'YYYY-MM';
+    const dateFormat = groupBy === 'day' ? '%Y-%m-%d' 
+      : groupBy === 'week' ? '%Y-%u' 
+      : '%Y-%m';
 
     const result = await db.select({
-      period: sql<string>`TO_CHAR(${orders.createdAt}, ${dateFormat})`,
-      totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
+      period: sql<string>`DATE_FORMAT(${orders.createdAt}, ${dateFormat})`,
+      totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
       orderCount: sql<number>`COUNT(*)`,
     }).from(orders)
       .where(and(
@@ -1012,8 +1062,8 @@ export async function getSalesByPeriod(startDate: Date, endDate: Date, groupBy: 
         lte(orders.createdAt, endDate),
         sql`${orders.orderStatus} != 'cancelado'`
       ))
-      .groupBy(sql`TO_CHAR(${orders.createdAt}, ${dateFormat})`)
-      .orderBy(sql`TO_CHAR(${orders.createdAt}, ${dateFormat})`);
+      .groupBy(sql`DATE_FORMAT(${orders.createdAt}, ${dateFormat})`)
+      .orderBy(sql`DATE_FORMAT(${orders.createdAt}, ${dateFormat})`);
 
     return result;
   }, `get sales by period ${groupBy}`);
@@ -1027,7 +1077,7 @@ export async function getSalesByPaymentMethod(startDate: Date, endDate: Date) {
   return executeWithLogging('getSalesByPaymentMethod', async () => {
     const result = await db.select({
       paymentMethod: orders.paymentMethod,
-      totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}::numeric), 0)`,
+      totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
       orderCount: sql<number>`COUNT(*)`,
     }).from(orders)
       .where(and(
@@ -1049,7 +1099,7 @@ export async function getSalesByCategory(startDate: Date, endDate: Date) {
   return executeWithLogging('getSalesByCategory', async () => {
     const result = await db.select({
       category: products.category,
-      totalSales: sql<string>`COALESCE(SUM(${orderItems.subtotal}::numeric), 0)`,
+      totalSales: sql<string>`COALESCE(SUM(${orderItems.subtotal}), 0)`,
       totalQuantity: sql<number>`SUM(${orderItems.quantity})`,
     }).from(orderItems)
       .innerJoin(orders, eq(orderItems.orderId, orders.id))
@@ -1063,4 +1113,84 @@ export async function getSalesByCategory(startDate: Date, endDate: Date) {
 
     return result;
   }, `get sales by category`);
+}
+
+// ==================== SAVED CARDS QUERIES (para gateway de pagamento) ====================
+
+export async function getSavedCardsByCustomer(customerId: number): Promise<SavedCard[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  return executeWithLogging('getSavedCardsByCustomer', async () => {
+    return db.select().from(savedCards)
+      .where(eq(savedCards.customerId, customerId))
+      .orderBy(desc(savedCards.isDefault), desc(savedCards.createdAt));
+  }, `get saved cards by customer ${customerId}`);
+}
+
+export async function createSavedCard(card: InsertSavedCard): Promise<number> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  return executeWithLogging('createSavedCard', async () => {
+    // Se for o cartão padrão, remove o padrão dos outros
+    if (card.isDefault) {
+      await db.update(savedCards)
+        .set({ isDefault: false })
+        .where(eq(savedCards.customerId, card.customerId));
+    }
+
+    const result = await db.insert(savedCards).values(card);
+    const insertId = (result as any)[0]?.insertId;
+    logger.info('Saved card created', { id: insertId, customerId: card.customerId, brand: card.brand });
+    return insertId;
+  }, `create saved card for customer ${card.customerId}`);
+}
+
+export async function deleteSavedCard(id: number, customerId: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  return executeWithLogging('deleteSavedCard', async () => {
+    await db.delete(savedCards)
+      .where(and(eq(savedCards.id, id), eq(savedCards.customerId, customerId)));
+    logger.info('Saved card deleted', { id, customerId });
+  }, `delete saved card ${id}`);
+}
+
+// ==================== PAYMENT TRANSACTIONS QUERIES ====================
+
+export async function createPaymentTransaction(transaction: InsertPaymentTransaction): Promise<number> {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  return executeWithLogging('createPaymentTransaction', async () => {
+    const result = await db.insert(paymentTransactions).values(transaction);
+    const insertId = (result as any)[0]?.insertId;
+    logger.info('Payment transaction created', { id: insertId, orderId: transaction.orderId });
+    return insertId;
+  }, `create payment transaction for order ${transaction.orderId}`);
+}
+
+export async function updatePaymentTransaction(id: number, updates: Partial<InsertPaymentTransaction>): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  return executeWithLogging('updatePaymentTransaction', async () => {
+    await db.update(paymentTransactions).set(updates).where(eq(paymentTransactions.id, id));
+    logger.info('Payment transaction updated', { id, updates: Object.keys(updates) });
+  }, `update payment transaction ${id}`);
+}
+
+export async function getPaymentTransactionByOrderId(orderId: number): Promise<PaymentTransaction | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+
+  return executeWithLogging('getPaymentTransactionByOrderId', async () => {
+    const result = await db.select().from(paymentTransactions)
+      .where(eq(paymentTransactions.orderId, orderId))
+      .orderBy(desc(paymentTransactions.createdAt))
+      .limit(1);
+    return result[0];
+  }, `get payment transaction by order ${orderId}`);
 }

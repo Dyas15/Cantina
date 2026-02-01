@@ -8,7 +8,8 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { ShoppingCart, Plus, Minus, ArrowLeft, Store, Package, History, X } from "lucide-react";
+import { ShoppingCart, Plus, Minus, ArrowLeft, Store, Package, History, X, LogOut, AlertTriangle } from "lucide-react";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 
 interface CartItem {
   productId: number;
@@ -34,6 +35,7 @@ export default function Menu() {
   const [quantity, setQuantity] = useState(1);
   const [showFlavorDialog, setShowFlavorDialog] = useState(false);
   const [showCartPreview, setShowCartPreview] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
 
   // Carrega cliente do localStorage
   useEffect(() => {
@@ -138,14 +140,10 @@ export default function Menu() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => {
-                localStorage.removeItem("cantina_customer");
-                localStorage.removeItem("cantina_cart");
-                navigate("/");
-              }}
+              onClick={() => setShowLogoutConfirm(true)}
               className="text-primary-foreground hover:bg-white/10 gap-1.5 h-10 px-3"
             >
-              <ArrowLeft className="h-5 w-5" />
+              <LogOut className="h-5 w-5" />
               <span className="hidden sm:inline">Sair</span>
             </Button>
             
@@ -381,6 +379,39 @@ export default function Menu() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Logout Confirmation Dialog */}
+      <AlertDialog open={showLogoutConfirm} onOpenChange={setShowLogoutConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-yellow-500" />
+              Sair da conta?
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-base">
+              Você está logado como <strong>{customer?.name}</strong>.
+              {cart.length > 0 && (
+                <span className="block mt-2 text-orange-600">
+                  Atenção: Você tem {cartCount} item(ns) no carrinho que serão perdidos.
+                </span>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                localStorage.removeItem("cantina_customer");
+                localStorage.removeItem("cantina_cart");
+                navigate("/");
+              }}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Sair
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Bottom Navigation / Cart Bar */}
       <div className="nav-mobile bg-card border-t-2 border-primary/20 shadow-lg">
