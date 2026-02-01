@@ -328,8 +328,8 @@ export async function recalculateCustomerDebt(customerId: number): Promise<void>
   if (!db) return;
 
   return executeWithLogging('recalculateCustomerDebt', async () => {
-    // Calcula o total de dívidas não pagas
-    const result = await db.select({
+    // Calcula o total de dívidas não pagas (fiado)
+    const debtResult = await db.select({
       total: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
     }).from(debts)
       .where(and(
@@ -337,14 +337,28 @@ export async function recalculateCustomerDebt(customerId: number): Promise<void>
         eq(debts.isPaid, false)
       ));
 
-    const totalDebt = Number(result[0]?.total || 0);
+    const fiadoDebt = Number(debtResult[0]?.total || 0);
+
+    // Calcula o total de pedidos com pagamento pendente (outros métodos)
+    const pendingResult = await db.select({
+      total: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+    }).from(orders)
+      .where(and(
+        eq(orders.customerId, customerId),
+        eq(orders.paymentStatus, 'pendente'),
+        sql`${orders.orderStatus} != 'cancelado'`,
+        sql`${orders.paymentMethod} != 'fiado'`
+      ));
+
+    const pendingPayments = Number(pendingResult[0]?.total || 0);
+    const totalDebt = fiadoDebt + pendingPayments;
 
     // Atualiza o totalDebt do cliente
     await db.update(customers)
       .set({ totalDebt: totalDebt.toFixed(2) })
       .where(eq(customers.id, customerId));
     
-    logger.debug('Customer debt recalculated', { customerId, totalDebt });
+    logger.debug('Customer debt recalculated', { customerId, totalDebt, fiadoDebt, pendingPayments });
   }, `recalculate customer debt ${customerId}`);
 }
 
@@ -463,17 +477,18 @@ export async function createOrder(order: Omit<InsertOrder, 'orderNumber'>, items
       );
     }
 
-    // Se for fiado, cria a dívida
+    // Cria a dívida se for fiado
     if (order.paymentMethod === 'fiado') {
       await db.insert(debts).values({
         customerId: order.customerId,
         orderId,
         amount: order.totalAmount,
       });
-      
-      // Atualiza total de dívida do cliente
-      await updateCustomerTotals(order.customerId, 0, Number(order.totalAmount));
     }
+
+    // Atualiza total de dívida do cliente para TODOS os métodos de pagamento
+    // (todos os pedidos pendentes são considerados dívidas)
+    await updateCustomerTotals(order.customerId, 0, Number(order.totalAmount));
 
     logger.info('Order created', { 
       orderId, 
@@ -637,21 +652,91 @@ export async function updatePaymentStatus(orderId: number, status: string): Prom
   if (!db) return;
 
   return executeWithLogging('updatePaymentStatus', async () => {
+    // Busca o pedido antes de atualizar para ter os dados corretos
+    const order = await getOrderById(orderId);
+    if (!order) {
+      logger.warn('Order not found for payment status update', { orderId });
+      return;
+    }
+
+    const previousStatus = order.paymentStatus;
+
+    // Verifica se já está no status desejado
+    if (previousStatus === status) {
+      logger.debug('Payment status already set', { orderId, status });
+      return;
+    }
+
+    // Atualiza o status do pagamento
     await db.update(orders).set({ paymentStatus: status as any }).where(eq(orders.id, orderId));
     
-    // Se o pagamento foi confirmado, atualiza o totalSpent do cliente
-    if (status === 'pago') {
-      const order = await getOrderById(orderId);
-      if (order) {
+    // Se o pagamento foi confirmado E o status anterior era pendente
+    // (evita duplicação se alguém mudar de pago->pendente->pago)
+    if (status === 'pago' && previousStatus === 'pendente') {
+      // Atualiza o totalSpent do cliente
+      await db.update(customers)
+        .set({
+          totalSpent: sql`${customers.totalSpent} + ${order.totalAmount}`,
+        })
+        .where(eq(customers.id, order.customerId));
+
+      // Se for fiado, marca a dívida como paga também
+      if (order.paymentMethod === 'fiado') {
+        const debtResult = await db.select().from(debts).where(eq(debts.orderId, orderId)).limit(1);
+        if (debtResult.length > 0 && !debtResult[0].isPaid) {
+          await db.update(debts).set({ 
+            isPaid: true, 
+            paidAt: new Date() 
+          }).where(eq(debts.orderId, orderId));
+          
+          // Atualiza o totalDebt do cliente (apenas para fiado que está na tabela debts)
+          await db.update(customers)
+            .set({
+              totalDebt: sql`GREATEST(${customers.totalDebt} - ${order.totalAmount}, 0)`,
+            })
+            .where(eq(customers.id, order.customerId));
+        }
+      }
+    }
+    
+    // Se o pagamento foi revertido de pago para pendente, reverte os totais
+    if (status === 'pendente' && previousStatus === 'pago') {
+      // Subtrai do totalSpent
+      await db.update(customers)
+        .set({
+          totalSpent: sql`GREATEST(${customers.totalSpent} - ${order.totalAmount}, 0)`,
+        })
+        .where(eq(customers.id, order.customerId));
+
+      // Se for fiado, marca a dívida como não paga
+      if (order.paymentMethod === 'fiado') {
+        await db.update(debts).set({ 
+          isPaid: false, 
+          paidAt: null 
+        }).where(eq(debts.orderId, orderId));
+        
+        // Adiciona de volta ao totalDebt
         await db.update(customers)
           .set({
-            totalSpent: sql`${customers.totalSpent} + ${order.totalAmount}`,
+            totalDebt: sql`${customers.totalDebt} + ${order.totalAmount}`,
           })
           .where(eq(customers.id, order.customerId));
       }
     }
     
-    logger.info('Payment status updated', { orderId, status });
+    logger.info('Payment status updated', { orderId, status, previousStatus, paymentMethod: order.paymentMethod });
+
+    // Emite eventos SSE para atualização em tempo real
+    try {
+      const { emitPaymentStatusChanged, emitOrderUpdated } = await import("./_core/events");
+      emitPaymentStatusChanged(orderId, status);
+      const updatedOrder = await getOrderById(orderId);
+      if (updatedOrder) {
+        emitOrderUpdated(orderId, updatedOrder);
+      }
+    } catch {
+      // Ignora se eventos não estiverem disponíveis
+    }
   }, `update payment status ${orderId} to ${status}`);
 }
 
@@ -881,7 +966,28 @@ export async function getFinancialSummary(startDate: Date, endDate: Date) {
 
     const totalSales = Number(salesResult[0]?.totalSales || 0);
     const totalReceived = Number(receivedResult[0]?.totalReceived || 0);
-    const totalPending = Number(pendingResult[0]?.totalPending || 0);
+    // Total a receber (TODOS os pedidos com pagamento pendente)
+    const fiadoPending = await db.select({
+      total: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
+    }).from(debts)
+      .where(and(
+        gte(debts.createdAt, startDate),
+        lte(debts.createdAt, endDate),
+        eq(debts.isPaid, false)
+      ));
+
+    const otherMethodsPending = await db.select({
+      total: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+    }).from(orders)
+      .where(and(
+        gte(orders.createdAt, startDate),
+        lte(orders.createdAt, endDate),
+        eq(orders.paymentStatus, 'pendente'),
+        sql`${orders.orderStatus} != 'cancelado'`,
+        sql`${orders.paymentMethod} != 'fiado'`
+      ));
+
+    const totalPending = Number(fiadoPending[0]?.total || 0) + Number(otherMethodsPending[0]?.total || 0);
     const profit = totalReceived - totalExpenses;
 
     return {
@@ -924,8 +1030,8 @@ export async function getSalesReport(startDate: Date, endDate: Date) {
         eq(orders.paymentStatus, 'pago')
       ));
 
-    // Total a receber (fiado não pago)
-    const totalPending = await db.select({
+    // Total a receber (TODOS os pedidos com pagamento pendente)
+    const fiadoPending = await db.select({
       total: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
     }).from(debts)
       .where(and(
@@ -934,11 +1040,24 @@ export async function getSalesReport(startDate: Date, endDate: Date) {
         eq(debts.isPaid, false)
       ));
 
+    const otherMethodsPending = await db.select({
+      total: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+    }).from(orders)
+      .where(and(
+        gte(orders.createdAt, startDate),
+        lte(orders.createdAt, endDate),
+        eq(orders.paymentStatus, 'pendente'),
+        sql`${orders.orderStatus} != 'cancelado'`,
+        sql`${orders.paymentMethod} != 'fiado'`
+      ));
+
+    const totalPending = Number(fiadoPending[0]?.total || 0) + Number(otherMethodsPending[0]?.total || 0);
+
     return {
       totalSales: Number(totalSales[0]?.total || 0),
       orderCount: Number(totalSales[0]?.count || 0),
       totalReceived: Number(totalReceived[0]?.total || 0),
-      totalPending: Number(totalPending[0]?.total || 0),
+      totalPending,
     };
   }, `get sales report ${startDate.toISOString()} to ${endDate.toISOString()}`);
 }

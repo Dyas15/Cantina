@@ -23,7 +23,8 @@ import {
   TrendingUp,
   Wallet,
   Eye,
-  User
+  User,
+  UserPlus
 } from "lucide-react";
 
 interface CartItem {
@@ -41,8 +42,13 @@ export default function AdminCustomers() {
   const [selectedCustomer, setSelectedCustomer] = useState<any>(null);
   const [showOrderDialog, setShowOrderDialog] = useState(false);
   const [showDetailsDialog, setShowDetailsDialog] = useState(false);
+  const [showCreateCustomerDialog, setShowCreateCustomerDialog] = useState(false);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [paymentMethod, setPaymentMethod] = useState<string>("dinheiro");
+  
+  // Campos para novo cliente
+  const [newCustomerName, setNewCustomerName] = useState("");
+  const [newCustomerPhone, setNewCustomerPhone] = useState("");
 
   const utils = trpc.useUtils();
 
@@ -52,6 +58,18 @@ export default function AdminCustomers() {
     { customerId: selectedCustomer?.id || 0 },
     { enabled: !!selectedCustomer }
   );
+
+  // Mutation para criar cliente (usa a rota create que requer admin)
+  const createCustomerMutation = trpc.customer.create.useMutation({
+    onSuccess: (customer) => {
+      toast.success(`Cliente "${customer.name}" cadastrado com sucesso!`);
+      utils.customer.list.invalidate();
+      closeCreateCustomerDialog();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
 
   const createOrderMutation = trpc.order.create.useMutation({
     onSuccess: () => {
@@ -99,6 +117,48 @@ export default function AdminCustomers() {
   const closeDetailsDialog = () => {
     setShowDetailsDialog(false);
     setSelectedCustomer(null);
+  };
+
+  const openCreateCustomerDialog = () => {
+    setNewCustomerName("");
+    setNewCustomerPhone("");
+    setShowCreateCustomerDialog(true);
+  };
+
+  const closeCreateCustomerDialog = () => {
+    setShowCreateCustomerDialog(false);
+    setNewCustomerName("");
+    setNewCustomerPhone("");
+  };
+
+  const handleCreateCustomer = () => {
+    if (!newCustomerName.trim()) {
+      toast.error("Digite o nome do cliente");
+      return;
+    }
+    if (!newCustomerPhone.trim() || newCustomerPhone.replace(/\D/g, '').length < 8) {
+      toast.error("Digite um telefone válido");
+      return;
+    }
+
+    createCustomerMutation.mutate({
+      name: newCustomerName.trim(),
+      phone: newCustomerPhone.trim(),
+    });
+  };
+
+  // Formatar telefone enquanto digita
+  const formatPhone = (value: string) => {
+    const numbers = value.replace(/\D/g, '');
+    if (numbers.length <= 2) return numbers;
+    if (numbers.length <= 7) return `(${numbers.slice(0, 2)}) ${numbers.slice(2)}`;
+    if (numbers.length <= 11) return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 7)}-${numbers.slice(7)}`;
+    return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 7)}-${numbers.slice(7, 11)}`;
+  };
+
+  const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const formatted = formatPhone(e.target.value);
+    setNewCustomerPhone(formatted);
   };
 
   const addToCart = (product: any, flavor?: string) => {
@@ -165,14 +225,24 @@ export default function AdminCustomers() {
     <AdminLayout>
       <div className="space-y-4 sm:space-y-6">
         {/* Header */}
-        <div>
-          <h1 className="text-2xl sm:text-3xl font-bold flex items-center gap-2">
-            <Users className="h-7 w-7 sm:h-8 sm:w-8 text-primary" />
-            Clientes
-          </h1>
-          <p className="text-sm sm:text-base text-muted-foreground mt-1">
-            Gerencie seus clientes e faça pedidos presenciais
-          </p>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl sm:text-3xl font-bold flex items-center gap-2">
+              <Users className="h-7 w-7 sm:h-8 sm:w-8 text-primary" />
+              Clientes
+            </h1>
+            <p className="text-sm sm:text-base text-muted-foreground mt-1">
+              Gerencie seus clientes e faça pedidos presenciais
+            </p>
+          </div>
+          <Button 
+            className="btn-primary shrink-0"
+            onClick={openCreateCustomerDialog}
+          >
+            <UserPlus className="h-4 w-4 mr-2" />
+            <span className="hidden sm:inline">Novo Cliente</span>
+            <span className="sm:hidden">Novo</span>
+          </Button>
         </div>
 
         {/* Stats Cards */}
@@ -262,9 +332,15 @@ export default function AdminCustomers() {
           <Card className="card-accessible">
             <CardContent className="py-12 text-center">
               <Users className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-              <p className="text-muted-foreground">
+              <p className="text-muted-foreground mb-4">
                 {searchQuery ? "Nenhum cliente encontrado" : "Nenhum cliente cadastrado"}
               </p>
+              {!searchQuery && (
+                <Button onClick={openCreateCustomerDialog} className="btn-primary">
+                  <UserPlus className="h-4 w-4 mr-2" />
+                  Cadastrar Primeiro Cliente
+                </Button>
+              )}
             </CardContent>
           </Card>
         ) : (
@@ -354,6 +430,56 @@ export default function AdminCustomers() {
             })}
           </div>
         )}
+
+        {/* Create Customer Dialog */}
+        <Dialog open={showCreateCustomerDialog} onOpenChange={closeCreateCustomerDialog}>
+          <DialogContent className="dialog-content sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle className="text-xl flex items-center gap-2">
+                <UserPlus className="h-5 w-5" />
+                Cadastrar Novo Cliente
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="customerName">Nome Completo *</Label>
+                <Input
+                  id="customerName"
+                  placeholder="Ex: João da Silva"
+                  value={newCustomerName}
+                  onChange={(e) => setNewCustomerName(e.target.value)}
+                  className="input-accessible"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="customerPhone">Telefone *</Label>
+                <Input
+                  id="customerPhone"
+                  placeholder="(00) 00000-0000"
+                  value={newCustomerPhone}
+                  onChange={handlePhoneChange}
+                  className="input-accessible"
+                  maxLength={15}
+                />
+                <p className="text-xs text-muted-foreground">
+                  O telefone será usado para identificar o cliente
+                </p>
+              </div>
+            </div>
+            <DialogFooter className="flex-col sm:flex-row gap-2">
+              <Button variant="outline" onClick={closeCreateCustomerDialog} className="w-full sm:w-auto">
+                Cancelar
+              </Button>
+              <Button
+                className="btn-primary w-full sm:w-auto"
+                onClick={handleCreateCustomer}
+                disabled={createCustomerMutation.isPending}
+              >
+                {createCustomerMutation.isPending ? "Cadastrando..." : "Cadastrar Cliente"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* Customer Details Dialog */}
         <Dialog open={showDetailsDialog} onOpenChange={closeDetailsDialog}>
@@ -482,6 +608,17 @@ export default function AdminCustomers() {
                   </div>
                 )}
 
+                {/* Info sobre pagamento */}
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 flex items-center gap-3">
+                  <AlertCircle className="h-5 w-5 text-blue-600 shrink-0" />
+                  <div>
+                    <p className="font-medium text-blue-800 text-sm">Pagamento pendente</p>
+                    <p className="text-sm text-blue-600">
+                      Todos os pedidos ficam pendentes até confirmação manual do pagamento
+                    </p>
+                  </div>
+                </div>
+
                 {/* Products */}
                 <div>
                   <Label className="text-base font-semibold">Produtos</Label>
@@ -588,6 +725,9 @@ export default function AdminCustomers() {
                       <SelectItem value="fiado">Fiado (Pagar Depois)</SelectItem>
                     </SelectContent>
                   </Select>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    O pagamento será marcado como pendente até confirmação
+                  </p>
                 </div>
               </div>
             )}

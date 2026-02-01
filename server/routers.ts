@@ -122,7 +122,19 @@ export const appRouter = router({
 
   // ==================== CUSTOMER ROUTES ====================
   customer: router({
+    // Identifica ou cria cliente (usado pelo cliente)
     identify: publicProcedure
+      .input(z.object({
+        name: z.string().min(2, "Nome deve ter pelo menos 2 caracteres"),
+        phone: z.string().min(8, "Telefone inválido"),
+      }))
+      .mutation(async ({ input }) => {
+        const customer = await db.findOrCreateCustomer(input.name, input.phone);
+        return customer;
+      }),
+
+    // Cria cliente (usado pelo admin - mesma lógica, mas com validação de admin)
+    create: adminProcedure
       .input(z.object({
         name: z.string().min(2, "Nome deve ter pelo menos 2 caracteres"),
         phone: z.string().min(8, "Telefone inválido"),
@@ -262,6 +274,17 @@ export const appRouter = router({
         notes: z.string().optional(),
       }))
       .mutation(async ({ input }) => {
+        // Validar se todos os produtos estão disponíveis
+        for (const item of input.items) {
+          const product = await db.getProductById(item.productId);
+          if (!product) {
+            throw new TRPCError({ code: 'NOT_FOUND', message: `Produto ${item.productName} não encontrado` });
+          }
+          if (!product.available) {
+            throw new TRPCError({ code: 'BAD_REQUEST', message: `Produto ${item.productName} não está disponível` });
+          }
+        }
+
         const { items, ...orderData } = input;
         const orderId = await db.createOrder(orderData, items);
         

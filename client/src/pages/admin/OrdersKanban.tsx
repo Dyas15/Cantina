@@ -90,6 +90,7 @@ export default function AdminOrdersKanban() {
     onSuccess: () => {
       toast.success("Status atualizado!");
       utils.order.list.invalidate();
+      utils.customer.list.invalidate();
     },
     onError: (error) => {
       toast.error(error.message);
@@ -100,6 +101,10 @@ export default function AdminOrdersKanban() {
     onSuccess: () => {
       toast.success("Pagamento confirmado!");
       utils.order.list.invalidate();
+      utils.customer.list.invalidate();
+      utils.debt.list.invalidate();
+      utils.report.sales.invalidate();
+      utils.report.financialSummary.invalidate();
     },
     onError: (error) => {
       toast.error(error.message);

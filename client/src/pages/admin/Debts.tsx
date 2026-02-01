@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { useRealtimeOrders } from "@/hooks/useRealtimeOrders";
-import { Search, AlertCircle, CheckCircle, DollarSign, User, Phone, Calendar, Eye, Package } from "lucide-react";
+import { Search, AlertCircle, CheckCircle, DollarSign, User, Phone, Calendar, Eye, Package, CreditCard, Banknote, QrCode, Clock } from "lucide-react";
 
 const paymentLabels: Record<string, string> = {
   pix: "Pix",
@@ -19,10 +19,18 @@ const paymentLabels: Record<string, string> = {
   fiado: "Fiado",
 };
 
+const paymentIcons: Record<string, any> = {
+  pix: QrCode,
+  dinheiro: Banknote,
+  cartao: CreditCard,
+  fiado: Clock,
+};
+
 export default function AdminDebts() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showPaid, setShowPaid] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<any>(null);
+  const [paymentMethodFilter, setPaymentMethodFilter] = useState<string>("all");
 
   const utils = trpc.useUtils();
   
@@ -42,20 +50,25 @@ export default function AdminDebts() {
     onSuccess: () => {
       toast.success("Pagamento confirmado!");
       utils.order.list.invalidate();
+      utils.customer.list.invalidate();
+      utils.debt.list.invalidate();
     },
     onError: (error) => {
       toast.error(error.message);
     },
   });
 
-  // Filtra pedidos com pagamento pendente (dívidas)
+  // Filtra pedidos com pagamento pendente (dívidas) - TODOS os métodos de pagamento
   const pendingOrders = orders?.filter(
     (o) => {
       const matchesStatus = showPaid 
         ? true 
         : o.paymentStatus === 'pendente';
       const notCancelled = o.orderStatus !== 'cancelado';
-      return matchesStatus && notCancelled;
+      const matchesPaymentMethod = paymentMethodFilter === 'all' 
+        ? true 
+        : o.paymentMethod === paymentMethodFilter;
+      return matchesStatus && notCancelled && matchesPaymentMethod;
     }
   ) || [];
 
@@ -87,6 +100,13 @@ export default function AdminDebts() {
     .filter((o) => o.paymentStatus === 'pendente')
     .reduce((sum, o) => sum + parseFloat(o.totalAmount), 0);
 
+  // Estatísticas por método de pagamento
+  const pendingByMethod = orders?.filter(o => o.paymentStatus === 'pendente' && o.orderStatus !== 'cancelado')
+    .reduce((acc: Record<string, number>, order) => {
+      acc[order.paymentMethod] = (acc[order.paymentMethod] || 0) + parseFloat(order.totalAmount);
+      return acc;
+    }, {}) || {};
+
   const handleMarkAsPaid = (orderId: number) => {
     updatePaymentMutation.mutate({ id: orderId, status: "pago" });
   };
@@ -98,22 +118,56 @@ export default function AdminDebts() {
         <div className="flex flex-col gap-4">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <h1 className="text-2xl sm:text-3xl font-bold">Dívidas</h1>
+              <h1 className="text-2xl sm:text-3xl font-bold flex items-center gap-2">
+                <AlertCircle className="h-7 w-7 sm:h-8 sm:w-8 text-red-600" />
+                Dívidas
+              </h1>
               <p className="text-sm sm:text-base text-muted-foreground mt-1">
-                Gerencie os pagamentos pendentes
+                Gerencie os pagamentos pendentes de todos os métodos
               </p>
             </div>
             <Card className="bg-red-50 border-red-200 shrink-0">
               <CardContent className="p-3 sm:p-4 flex items-center gap-2 sm:gap-3">
                 <AlertCircle className="h-6 w-6 sm:h-8 sm:w-8 text-red-600 shrink-0" />
                 <div>
-                  <p className="text-xs sm:text-sm text-red-600">Pendente</p>
+                  <p className="text-xs sm:text-sm text-red-600">Total Pendente</p>
                   <p className="text-lg sm:text-2xl font-bold text-red-700">
                     R$ {totalPending.toFixed(2)}
                   </p>
                 </div>
               </CardContent>
             </Card>
+          </div>
+
+          {/* Stats por método de pagamento */}
+          <div className="grid gap-2 sm:gap-3 grid-cols-2 lg:grid-cols-4">
+            {Object.entries(paymentLabels).map(([method, label]) => {
+              const Icon = paymentIcons[method];
+              const amount = pendingByMethod[method] || 0;
+              const isActive = paymentMethodFilter === method;
+              
+              return (
+                <Card 
+                  key={method}
+                  className={`cursor-pointer transition-all ${
+                    isActive ? 'ring-2 ring-primary bg-primary/5' : 'hover:bg-muted/50'
+                  } ${amount > 0 ? 'border-orange-200' : ''}`}
+                  onClick={() => setPaymentMethodFilter(isActive ? 'all' : method)}
+                >
+                  <CardContent className="p-3 flex items-center gap-2">
+                    <div className={`p-2 rounded-lg ${amount > 0 ? 'bg-orange-100' : 'bg-muted'}`}>
+                      <Icon className={`h-4 w-4 ${amount > 0 ? 'text-orange-600' : 'text-muted-foreground'}`} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs text-muted-foreground truncate">{label}</p>
+                      <p className={`font-bold ${amount > 0 ? 'text-orange-600' : 'text-muted-foreground'}`}>
+                        R$ {amount.toFixed(2)}
+                      </p>
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
           </div>
 
           {/* Search and Filters */}
@@ -136,6 +190,18 @@ export default function AdminDebts() {
               <Label htmlFor="showPaid" className="text-sm cursor-pointer">Mostrar pagos</Label>
             </div>
           </div>
+
+          {/* Info sobre o sistema */}
+          <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 flex items-start gap-3">
+            <AlertCircle className="h-5 w-5 text-blue-600 shrink-0 mt-0.5" />
+            <div className="text-sm text-blue-800">
+              <p className="font-medium">Como funciona o sistema de dívidas</p>
+              <p className="text-blue-600 mt-1">
+                Todos os pedidos (Pix, Cartão, Dinheiro, Fiado) ficam como "pendentes" até que você confirme o pagamento manualmente. 
+                Clique em "Marcar Pago" quando receber o valor.
+              </p>
+            </div>
+          </div>
         </div>
 
         {/* Debts List */}
@@ -150,6 +216,15 @@ export default function AdminDebts() {
               <p className="text-muted-foreground">
                 {showPaid ? "Nenhum pedido encontrado" : "Nenhum pagamento pendente"}
               </p>
+              {paymentMethodFilter !== 'all' && (
+                <Button 
+                  variant="outline" 
+                  className="mt-4"
+                  onClick={() => setPaymentMethodFilter('all')}
+                >
+                  Mostrar todos os métodos
+                </Button>
+              )}
             </CardContent>
           </Card>
         ) : (
@@ -162,10 +237,16 @@ export default function AdminDebts() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <CardTitle className="text-lg sm:text-xl flex items-center gap-2">
-                          <User className="h-5 w-5 shrink-0" />
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold shrink-0 ${
+                            group.totalPending > 0 
+                              ? "bg-red-100 text-red-700" 
+                              : "bg-green-100 text-green-700"
+                          }`}>
+                            {group.customer.name.charAt(0).toUpperCase()}
+                          </div>
                           <span className="truncate">{group.customer.name}</span>
                         </CardTitle>
-                        <p className="text-sm text-muted-foreground flex items-center gap-1 mt-1">
+                        <p className="text-sm text-muted-foreground flex items-center gap-1 mt-1 ml-12">
                           <Phone className="h-3 w-3" />
                           {group.customer.phone}
                         </p>
@@ -182,73 +263,78 @@ export default function AdminDebts() {
                   </CardHeader>
                   <CardContent className="pt-0">
                     <div className="space-y-2">
-                      {group.orders.map((order: any) => (
-                        <div
-                          key={order.id}
-                          className={`p-3 rounded-xl ${
-                            order.paymentStatus === "pago" 
-                              ? "bg-green-50 border border-green-200" 
-                              : "bg-red-50 border border-red-200"
-                          }`}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0 flex-1">
-                              <p className="font-medium text-sm sm:text-base">
-                                Pedido #{order.orderNumber}
-                              </p>
-                              <div className="flex flex-wrap gap-2 mt-1">
-                                <Badge variant="secondary" className="text-xs">
-                                  {paymentLabels[order.paymentMethod]}
-                                </Badge>
-                                <p className="text-xs text-muted-foreground flex items-center gap-1">
-                                  <Calendar className="h-3 w-3" />
-                                  {new Date(order.createdAt).toLocaleDateString("pt-BR")}
+                      {group.orders.map((order: any) => {
+                        const PaymentIcon = paymentIcons[order.paymentMethod];
+                        
+                        return (
+                          <div
+                            key={order.id}
+                            className={`p-3 rounded-xl ${
+                              order.paymentStatus === "pago" 
+                                ? "bg-green-50 border border-green-200" 
+                                : "bg-red-50 border border-red-200"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0 flex-1">
+                                <p className="font-medium text-sm sm:text-base">
+                                  Pedido #{order.orderNumber}
                                 </p>
+                                <div className="flex flex-wrap gap-2 mt-1">
+                                  <Badge variant="secondary" className="text-xs flex items-center gap-1">
+                                    <PaymentIcon className="h-3 w-3" />
+                                    {paymentLabels[order.paymentMethod]}
+                                  </Badge>
+                                  <p className="text-xs text-muted-foreground flex items-center gap-1">
+                                    <Calendar className="h-3 w-3" />
+                                    {new Date(order.createdAt).toLocaleDateString("pt-BR")}
+                                  </p>
+                                </div>
+                                {order.paymentStatus === "pago" && (
+                                  <p className="text-xs text-green-600 mt-1">
+                                    Pago em: {new Date(order.updatedAt).toLocaleDateString("pt-BR")}
+                                  </p>
+                                )}
                               </div>
-                              {order.paymentStatus === "pago" && (
-                                <p className="text-xs text-green-600 mt-1">
-                                  Pago em: {new Date(order.updatedAt).toLocaleDateString("pt-BR")}
-                                </p>
-                              )}
-                            </div>
-                            <div className="flex flex-col sm:flex-row items-end sm:items-center gap-2 shrink-0">
-                              <div className="text-right">
-                                <p className="text-lg sm:text-xl font-bold">
-                                  R$ {parseFloat(order.totalAmount).toFixed(2)}
-                                </p>
-                                <Badge 
-                                  variant={order.paymentStatus === "pago" ? "default" : "destructive"}
-                                  className="text-xs"
-                                >
-                                  {order.paymentStatus === "pago" ? "Pago" : "Pendente"}
-                                </Badge>
+                              <div className="flex flex-col sm:flex-row items-end sm:items-center gap-2 shrink-0">
+                                <div className="text-right">
+                                  <p className="text-lg sm:text-xl font-bold">
+                                    R$ {parseFloat(order.totalAmount).toFixed(2)}
+                                  </p>
+                                  <Badge 
+                                    variant={order.paymentStatus === "pago" ? "default" : "destructive"}
+                                    className="text-xs"
+                                  >
+                                    {order.paymentStatus === "pago" ? "Pago" : "Pendente"}
+                                  </Badge>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                          <div className="flex gap-2 mt-3">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="flex-1"
-                              onClick={() => setSelectedOrder(order)}
-                            >
-                              <Eye className="h-4 w-4 mr-1" />
-                              Ver Detalhes
-                            </Button>
-                            {order.paymentStatus !== "pago" && (
+                            <div className="flex gap-2 mt-3">
                               <Button
+                                variant="outline"
                                 size="sm"
                                 className="flex-1"
-                                onClick={() => handleMarkAsPaid(order.id)}
-                                disabled={updatePaymentMutation.isPending}
+                                onClick={() => setSelectedOrder(order)}
                               >
-                                <DollarSign className="h-4 w-4 mr-1" />
-                                Marcar Pago
+                                <Eye className="h-4 w-4 mr-1" />
+                                Ver Detalhes
                               </Button>
-                            )}
+                              {order.paymentStatus !== "pago" && (
+                                <Button
+                                  size="sm"
+                                  className="flex-1"
+                                  onClick={() => handleMarkAsPaid(order.id)}
+                                  disabled={updatePaymentMutation.isPending}
+                                >
+                                  <DollarSign className="h-4 w-4 mr-1" />
+                                  Marcar Pago
+                                </Button>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </CardContent>
                 </Card>
@@ -295,7 +381,13 @@ export default function AdminDebts() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <h4 className="font-semibold text-sm text-muted-foreground mb-1">Pagamento</h4>
-                  <p className="font-medium">{paymentLabels[selectedOrder.paymentMethod]}</p>
+                  <div className="flex items-center gap-2">
+                    {(() => {
+                      const Icon = paymentIcons[selectedOrder.paymentMethod];
+                      return <Icon className="h-4 w-4" />;
+                    })()}
+                    <span className="font-medium">{paymentLabels[selectedOrder.paymentMethod]}</span>
+                  </div>
                 </div>
                 <div>
                   <h4 className="font-semibold text-sm text-muted-foreground mb-1">Status</h4>
