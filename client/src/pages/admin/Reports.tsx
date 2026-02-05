@@ -338,6 +338,9 @@ export default function AdminReports() {
                 <AlertCircle className="h-5 w-5 text-red-500" />
                 Maiores Devedores
               </CardTitle>
+              <p className="text-xs text-muted-foreground mt-1">
+                Inclui todos os métodos de pagamento pendentes (Pix, Dinheiro, Cartão, Fiado)
+              </p>
             </CardHeader>
             <CardContent>
               {debtorsLoading ? (
@@ -350,7 +353,7 @@ export default function AdminReports() {
                 <div className="text-center py-8">
                   <AlertCircle className="h-12 w-12 mx-auto text-green-500 mb-3" />
                   <p className="text-muted-foreground">
-                    Nenhum devedor
+                    Nenhum pagamento pendente
                   </p>
                 </div>
               ) : (

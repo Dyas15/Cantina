@@ -372,6 +372,66 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    // Registrar pagamento parcial
+    registerPartialPayment: adminProcedure
+      .input(z.object({
+        id: z.number(),
+        amount: z.string(), // Valor pago agora
+      }))
+      .mutation(async ({ input }) => {
+        await db.registerPartialPayment(input.id, input.amount);
+        
+        const updatedOrder = await db.getOrderById(input.id);
+        if (updatedOrder) {
+          emitOrderUpdated(input.id, updatedOrder);
+          emitPaymentStatusChanged(input.id, updatedOrder.paymentStatus);
+        }
+        
+        return { success: true };
+      }),
+
+    // Editar pedido
+    update: adminProcedure
+      .input(z.object({
+        id: z.number(),
+        notes: z.string().optional(),
+        paymentMethod: z.enum(["pix", "dinheiro", "cartao", "fiado"]).optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const { id, ...updates } = input;
+        await db.updateOrder(id, updates);
+        
+        const updatedOrder = await db.getOrderById(id);
+        if (updatedOrder) {
+          emitOrderUpdated(id, updatedOrder);
+        }
+        
+        return { success: true };
+      }),
+
+    // Excluir pedido
+    delete: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        await db.deleteOrder(input.id);
+        return { success: true };
+      }),
+
+    // Desfazer pagamento (reverter para pendente)
+    undoPayment: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        await db.updatePaymentStatus(input.id, 'pendente');
+        emitPaymentStatusChanged(input.id, 'pendente');
+        
+        const updatedOrder = await db.getOrderById(input.id);
+        if (updatedOrder) {
+          emitOrderUpdated(input.id, updatedOrder);
+        }
+        
+        return { success: true };
+      }),
+
     generatePix: publicProcedure
       .input(z.object({ orderId: z.number() }))
       .mutation(async ({ input }) => {
@@ -453,6 +513,21 @@ export const appRouter = router({
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
         await db.deleteExpense(input.id);
+        return { success: true };
+      }),
+
+    update: adminProcedure
+      .input(z.object({
+        id: z.number(),
+        description: z.string().optional(),
+        amount: z.string().optional(),
+        category: z.string().optional(),
+        date: z.date().optional(),
+        notes: z.string().optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const { id, ...updates } = input;
+        await db.updateExpense(id, updates);
         return { success: true };
       }),
   }),

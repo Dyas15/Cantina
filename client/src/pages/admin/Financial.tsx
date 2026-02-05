@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { useRealtimeOrders } from "@/hooks/useRealtimeOrders";
@@ -15,6 +16,7 @@ import {
   TrendingUp, 
   Plus, 
   Trash2,
+  Edit,
   Calendar,
   PieChart,
   ArrowUpRight,
@@ -37,7 +39,11 @@ const expenseCategories = [
 
 export default function AdminFinancial() {
   const [showAddExpense, setShowAddExpense] = useState(false);
+  const [showEditExpense, setShowEditExpense] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [selectedPeriod, setSelectedPeriod] = useState<"today" | "week" | "month">("today");
+  const [expenseToEdit, setExpenseToEdit] = useState<any>(null);
+  const [expenseToDelete, setExpenseToDelete] = useState<any>(null);
   
   // Form state
   const [expenseDescription, setExpenseDescription] = useState("");
@@ -106,9 +112,27 @@ export default function AdminFinancial() {
     },
   });
 
+  const updateExpenseMutation = trpc.expense.update.useMutation({
+    onSuccess: () => {
+      toast.success("Despesa atualizada com sucesso!");
+      setShowEditExpense(false);
+      setExpenseToEdit(null);
+      resetForm();
+      refetchExpenses();
+      refetchSummary();
+      utils.expense.list.invalidate();
+      utils.report.financialSummary.invalidate();
+    },
+    onError: (error) => {
+      toast.error(error.message || "Erro ao atualizar despesa");
+    },
+  });
+
   const deleteExpenseMutation = trpc.expense.delete.useMutation({
     onSuccess: () => {
       toast.success("Despesa removida!");
+      setShowDeleteConfirm(false);
+      setExpenseToDelete(null);
       refetchExpenses();
       refetchSummary();
       utils.expense.list.invalidate();
@@ -148,6 +172,50 @@ export default function AdminFinancial() {
       date: dateObj,
       notes: expenseNotes.trim() || undefined,
     });
+  };
+
+  const openEditExpense = (expense: any) => {
+    setExpenseToEdit(expense);
+    setExpenseDescription(expense.description);
+    setExpenseAmount(expense.amount);
+    setExpenseCategory(expense.category);
+    setExpenseDate(new Date(expense.date).toISOString().split("T")[0]);
+    setExpenseNotes(expense.notes || "");
+    setShowEditExpense(true);
+  };
+
+  const handleEditExpense = () => {
+    if (!expenseToEdit) return;
+    if (!expenseDescription.trim()) {
+      toast.error("Informe a descrição da despesa");
+      return;
+    }
+    if (!expenseAmount || parseFloat(expenseAmount) <= 0) {
+      toast.error("Informe um valor válido");
+      return;
+    }
+
+    const [year, month, day] = expenseDate.split('-').map(Number);
+    const dateObj = new Date(year, month - 1, day, 12, 0, 0);
+
+    updateExpenseMutation.mutate({
+      id: expenseToEdit.id,
+      description: expenseDescription.trim(),
+      amount: parseFloat(expenseAmount).toFixed(2),
+      category: expenseCategory,
+      date: dateObj,
+      notes: expenseNotes.trim() || undefined,
+    });
+  };
+
+  const openDeleteConfirm = (expense: any) => {
+    setExpenseToDelete(expense);
+    setShowDeleteConfirm(true);
+  };
+
+  const handleDeleteExpense = () => {
+    if (!expenseToDelete) return;
+    deleteExpenseMutation.mutate({ id: expenseToDelete.id });
   };
 
   const getPaymentIcon = (method: string) => {
@@ -412,12 +480,16 @@ export default function AdminFinancial() {
                     <Button
                       variant="ghost"
                       size="sm"
+                      className="h-8 w-8 p-0 text-muted-foreground hover:text-blue-600"
+                      onClick={() => openEditExpense(expense)}
+                    >
+                      <Edit className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive"
-                      onClick={() => {
-                        if (confirm("Remover esta despesa?")) {
-                          deleteExpenseMutation.mutate({ id: expense.id });
-                        }
-                      }}
+                      onClick={() => openDeleteConfirm(expense)}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
@@ -531,6 +603,117 @@ export default function AdminFinancial() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Edit Expense Dialog */}
+      <Dialog open={showEditExpense} onOpenChange={setShowEditExpense}>
+        <DialogContent className="dialog-content sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-xl">Editar Despesa</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label className="label-accessible">Descrição</Label>
+              <Input
+                placeholder="Ex: Compra de ingredientes"
+                value={expenseDescription}
+                onChange={(e) => setExpenseDescription(e.target.value)}
+                className="input-accessible"
+              />
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label className="label-accessible">Valor (R$)</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="0,00"
+                  value={expenseAmount}
+                  onChange={(e) => setExpenseAmount(e.target.value)}
+                  className="input-accessible"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="label-accessible">Data</Label>
+                <Input
+                  type="date"
+                  value={expenseDate}
+                  onChange={(e) => setExpenseDate(e.target.value)}
+                  className="input-accessible"
+                />
+              </div>
+            </div>
+            
+            <div className="space-y-2">
+              <Label className="label-accessible">Categoria</Label>
+              <Select value={expenseCategory} onValueChange={setExpenseCategory}>
+                <SelectTrigger className="input-accessible">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {expenseCategories.map((cat) => (
+                    <SelectItem key={cat.value} value={cat.value}>
+                      {cat.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            
+            <div className="space-y-2">
+              <Label className="label-accessible">Observações (opcional)</Label>
+              <Textarea
+                placeholder="Detalhes adicionais..."
+                value={expenseNotes}
+                onChange={(e) => setExpenseNotes(e.target.value)}
+                className="textarea-accessible min-h-[80px]"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setShowEditExpense(false);
+                setExpenseToEdit(null);
+                resetForm();
+              }}
+            >
+              Cancelar
+            </Button>
+            <Button
+              className="btn-primary"
+              onClick={handleEditExpense}
+              disabled={updateExpenseMutation.isPending}
+            >
+              {updateExpenseMutation.isPending ? "Salvando..." : "Salvar Alterações"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Excluir Despesa</AlertDialogTitle>
+            <AlertDialogDescription>
+              Tem certeza que deseja excluir a despesa "{expenseToDelete?.description}"?
+              Esta ação não pode ser desfeita.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={handleDeleteExpense}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {deleteExpenseMutation.isPending ? "Excluindo..." : "Excluir"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </AdminLayout>
   );
 }

@@ -918,6 +918,31 @@ export async function deleteExpense(id: number): Promise<void> {
   }, `delete expense ${id}`);
 }
 
+export async function updateExpense(id: number, updates: {
+  description?: string;
+  amount?: string;
+  category?: string;
+  date?: Date;
+  notes?: string;
+}): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  return executeWithLogging('updateExpense', async () => {
+    const updateData: Record<string, any> = {};
+    if (updates.description !== undefined) updateData.description = updates.description;
+    if (updates.amount !== undefined) updateData.amount = updates.amount;
+    if (updates.category !== undefined) updateData.category = updates.category;
+    if (updates.date !== undefined) updateData.date = updates.date;
+    if (updates.notes !== undefined) updateData.notes = updates.notes;
+
+    if (Object.keys(updateData).length > 0) {
+      await db.update(expenses).set(updateData).where(eq(expenses.id, id));
+      logger.info('Expense updated', { id, updates: Object.keys(updateData) });
+    }
+  }, `update expense ${id}`);
+}
+
 export async function getFinancialSummary(startDate: Date, endDate: Date) {
   const db = await getDb();
   if (!db) return null;
@@ -926,6 +951,7 @@ export async function getFinancialSummary(startDate: Date, endDate: Date) {
     // Total de vendas (pedidos não cancelados)
     const salesResult = await db.select({
       totalSales: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+      orderCount: sql<number>`COUNT(*)`,
     }).from(orders)
       .where(and(
         gte(orders.createdAt, startDate),
@@ -992,7 +1018,7 @@ export async function getFinancialSummary(startDate: Date, endDate: Date) {
 
     return {
       totalSales,
-      orderCount: 0,
+      orderCount: Number(salesResult[0]?.orderCount || 0),
       totalReceived,
       totalPending,
       totalExpenses,
@@ -1126,24 +1152,51 @@ export async function getTopDebtors(limit = 10) {
   if (!db) return [];
 
   return executeWithLogging('getTopDebtors', async () => {
-    // Busca clientes com dívidas não pagas (calculado dinamicamente)
-    const debtorsResult = await db.select({
+    // Busca dívidas de fiado não pagas
+    const fiadoDebts = await db.select({
       customerId: debts.customerId,
-      totalDebt: sql<string>`SUM(${debts.amount})`,
+      totalDebt: sql<string>`COALESCE(SUM(${debts.amount}), 0)`,
     }).from(debts)
       .where(eq(debts.isPaid, false))
-      .groupBy(debts.customerId)
-      .having(sql`SUM(${debts.amount}) > 0`)
-      .orderBy(desc(sql`SUM(${debts.amount})`))
-      .limit(limit);
+      .groupBy(debts.customerId);
+
+    // Busca pedidos pendentes de outros métodos de pagamento
+    const otherPending = await db.select({
+      customerId: orders.customerId,
+      totalPending: sql<string>`COALESCE(SUM(${orders.totalAmount}), 0)`,
+    }).from(orders)
+      .where(and(
+        eq(orders.paymentStatus, 'pendente'),
+        sql`${orders.orderStatus} != 'cancelado'`,
+        sql`${orders.paymentMethod} != 'fiado'`
+      ))
+      .groupBy(orders.customerId);
+
+    // Combina os resultados
+    const debtMap: Record<number, number> = {};
+    
+    for (const debt of fiadoDebts) {
+      debtMap[debt.customerId] = Number(debt.totalDebt || 0);
+    }
+    
+    for (const pending of otherPending) {
+      debtMap[pending.customerId] = (debtMap[pending.customerId] || 0) + Number(pending.totalPending || 0);
+    }
+
+    // Ordena por total de dívida e pega os top N
+    const sortedDebtors = Object.entries(debtMap)
+      .filter(([_, total]) => total > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit);
 
     // Busca dados dos clientes
     const debtorsWithDetails = await Promise.all(
-      debtorsResult.map(async (item) => {
-        const customer = await getCustomerById(item.customerId);
+      sortedDebtors.map(async ([customerIdStr, totalDebt]) => {
+        const customerId = parseInt(customerIdStr);
+        const customer = await getCustomerById(customerId);
         return {
           ...customer!,
-          totalDebt: item.totalDebt,
+          totalDebt: totalDebt.toFixed(2),
         };
       })
     );
@@ -1312,4 +1365,146 @@ export async function getPaymentTransactionByOrderId(orderId: number): Promise<P
       .limit(1);
     return result[0];
   }, `get payment transaction by order ${orderId}`);
+}
+
+
+// ==================== PARTIAL PAYMENT & ORDER MANAGEMENT ====================
+
+export async function registerPartialPayment(orderId: number, amount: string): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  return executeWithLogging('registerPartialPayment', async () => {
+    const order = await getOrderById(orderId);
+    if (!order) throw new Error("Pedido não encontrado");
+
+    const paymentAmount = Number(amount);
+    const currentPaid = Number(order.paidAmount || 0);
+    const totalAmount = Number(order.totalAmount);
+    const newPaidAmount = currentPaid + paymentAmount;
+
+    // Atualiza o valor pago
+    await db.update(orders).set({
+      paidAmount: newPaidAmount.toFixed(2),
+      paymentStatus: newPaidAmount >= totalAmount ? 'pago' : 'pendente',
+    }).where(eq(orders.id, orderId));
+
+    // Atualiza totais do cliente
+    await db.update(customers)
+      .set({
+        totalSpent: sql`${customers.totalSpent} + ${paymentAmount}`,
+        totalDebt: sql`GREATEST(${customers.totalDebt} - ${paymentAmount}, 0)`,
+      })
+      .where(eq(customers.id, order.customerId));
+
+    // Se for fiado e pagou tudo, marca a dívida como paga
+    if (order.paymentMethod === 'fiado' && newPaidAmount >= totalAmount) {
+      await db.update(debts).set({
+        isPaid: true,
+        paidAt: new Date(),
+      }).where(eq(debts.orderId, orderId));
+    }
+
+    logger.info('Partial payment registered', { 
+      orderId, 
+      paymentAmount, 
+      newPaidAmount, 
+      totalAmount,
+      isFullyPaid: newPaidAmount >= totalAmount
+    });
+  }, `register partial payment ${orderId} amount ${amount}`);
+}
+
+export async function updateOrder(orderId: number, updates: {
+  notes?: string;
+  paymentMethod?: 'pix' | 'dinheiro' | 'cartao' | 'fiado';
+}): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  return executeWithLogging('updateOrder', async () => {
+    const order = await getOrderById(orderId);
+    if (!order) throw new Error("Pedido não encontrado");
+
+    const updateData: Record<string, any> = {};
+    
+    if (updates.notes !== undefined) {
+      updateData.notes = updates.notes;
+    }
+
+    // Se mudou o método de pagamento
+    if (updates.paymentMethod && updates.paymentMethod !== order.paymentMethod) {
+      const oldMethod = order.paymentMethod;
+      const newMethod = updates.paymentMethod;
+
+      // Se era fiado e mudou para outro método, remove a dívida
+      if (oldMethod === 'fiado' && newMethod !== 'fiado') {
+        await db.delete(debts).where(eq(debts.orderId, orderId));
+      }
+
+      // Se mudou para fiado, cria a dívida
+      if (newMethod === 'fiado' && oldMethod !== 'fiado') {
+        const remainingAmount = Number(order.totalAmount) - Number(order.paidAmount || 0);
+        if (remainingAmount > 0) {
+          await db.insert(debts).values({
+            customerId: order.customerId,
+            orderId,
+            amount: remainingAmount.toFixed(2),
+          });
+        }
+      }
+
+      updateData.paymentMethod = newMethod;
+    }
+
+    if (Object.keys(updateData).length > 0) {
+      await db.update(orders).set(updateData).where(eq(orders.id, orderId));
+    }
+
+    logger.info('Order updated', { orderId, updates: Object.keys(updates) });
+  }, `update order ${orderId}`);
+}
+
+export async function deleteOrder(orderId: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  return executeWithLogging('deleteOrder', async () => {
+    const order = await getOrderById(orderId);
+    if (!order) throw new Error("Pedido não encontrado");
+
+    // Reverte os totais do cliente se o pedido não estava pago
+    if (order.paymentStatus !== 'pago') {
+      const unpaidAmount = Number(order.totalAmount) - Number(order.paidAmount || 0);
+      await db.update(customers)
+        .set({
+          totalDebt: sql`GREATEST(${customers.totalDebt} - ${unpaidAmount}, 0)`,
+        })
+        .where(eq(customers.id, order.customerId));
+    }
+
+    // Se tinha valor pago, subtrai do totalSpent
+    const paidAmount = Number(order.paidAmount || 0);
+    if (paidAmount > 0) {
+      await db.update(customers)
+        .set({
+          totalSpent: sql`GREATEST(${customers.totalSpent} - ${paidAmount}, 0)`,
+        })
+        .where(eq(customers.id, order.customerId));
+    }
+
+    // Remove dívidas associadas
+    await db.delete(debts).where(eq(debts.orderId, orderId));
+
+    // Remove itens do pedido
+    await db.delete(orderItems).where(eq(orderItems.orderId, orderId));
+
+    // Remove transações de pagamento
+    await db.delete(paymentTransactions).where(eq(paymentTransactions.orderId, orderId));
+
+    // Remove o pedido
+    await db.delete(orders).where(eq(orders.id, orderId));
+
+    logger.info('Order deleted', { orderId, customerId: order.customerId });
+  }, `delete order ${orderId}`);
 }

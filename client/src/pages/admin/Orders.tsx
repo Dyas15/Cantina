@@ -4,8 +4,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { useRealtimeOrders } from "@/hooks/useRealtimeOrders";
@@ -20,7 +23,11 @@ import {
   DollarSign,
   Grid3x3,
   Filter,
-  Eye
+  Eye,
+  Edit,
+  Trash2,
+  Undo2,
+  CreditCard
 } from "lucide-react";
 
 const statusConfig: Record<string, { label: string; color: string; icon: any }> = {
@@ -44,6 +51,19 @@ export default function AdminOrders() {
   const [sortBy, setSortBy] = useState<string>("recent");
   const [selectedOrder, setSelectedOrder] = useState<any>(null);
   const [showFilters, setShowFilters] = useState(false);
+  
+  // Estados para modais
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showPartialPayment, setShowPartialPayment] = useState(false);
+  const [orderToEdit, setOrderToEdit] = useState<any>(null);
+  const [orderToDelete, setOrderToDelete] = useState<any>(null);
+  const [orderForPartialPayment, setOrderForPartialPayment] = useState<any>(null);
+  
+  // Estados para formulários
+  const [editNotes, setEditNotes] = useState("");
+  const [editPaymentMethod, setEditPaymentMethod] = useState("");
+  const [partialPaymentAmount, setPartialPaymentAmount] = useState("");
 
   const utils = trpc.useUtils();
 
@@ -72,6 +92,64 @@ export default function AdminOrders() {
   const updatePaymentMutation = trpc.order.updatePaymentStatus.useMutation({
     onSuccess: () => {
       toast.success("Pagamento confirmado!");
+      utils.order.list.invalidate();
+      utils.customer.list.invalidate();
+      utils.debt.list.invalidate();
+      utils.report.sales.invalidate();
+      utils.report.financialSummary.invalidate();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const undoPaymentMutation = trpc.order.undoPayment.useMutation({
+    onSuccess: () => {
+      toast.success("Pagamento revertido para pendente!");
+      utils.order.list.invalidate();
+      utils.customer.list.invalidate();
+      utils.debt.list.invalidate();
+      utils.report.sales.invalidate();
+      utils.report.financialSummary.invalidate();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const updateOrderMutation = trpc.order.update.useMutation({
+    onSuccess: () => {
+      toast.success("Pedido atualizado!");
+      setShowEditModal(false);
+      setOrderToEdit(null);
+      utils.order.list.invalidate();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const deleteOrderMutation = trpc.order.delete.useMutation({
+    onSuccess: () => {
+      toast.success("Pedido excluído!");
+      setShowDeleteConfirm(false);
+      setOrderToDelete(null);
+      utils.order.list.invalidate();
+      utils.customer.list.invalidate();
+      utils.report.sales.invalidate();
+      utils.report.financialSummary.invalidate();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const partialPaymentMutation = trpc.order.registerPartialPayment.useMutation({
+    onSuccess: () => {
+      toast.success("Pagamento parcial registrado!");
+      setShowPartialPayment(false);
+      setOrderForPartialPayment(null);
+      setPartialPaymentAmount("");
       utils.order.list.invalidate();
       utils.customer.list.invalidate();
       utils.debt.list.invalidate();
@@ -123,6 +201,61 @@ export default function AdminOrders() {
 
   const handleMarkAsPaid = (orderId: number) => {
     updatePaymentMutation.mutate({ id: orderId, status: "pago" });
+  };
+
+  const handleUndoPayment = (orderId: number) => {
+    undoPaymentMutation.mutate({ id: orderId });
+  };
+
+  const openEditModal = (order: any) => {
+    setOrderToEdit(order);
+    setEditNotes(order.notes || "");
+    setEditPaymentMethod(order.paymentMethod);
+    setShowEditModal(true);
+  };
+
+  const handleSaveEdit = () => {
+    if (!orderToEdit) return;
+    updateOrderMutation.mutate({
+      id: orderToEdit.id,
+      notes: editNotes,
+      paymentMethod: editPaymentMethod as any,
+    });
+  };
+
+  const openDeleteConfirm = (order: any) => {
+    setOrderToDelete(order);
+    setShowDeleteConfirm(true);
+  };
+
+  const handleDelete = () => {
+    if (!orderToDelete) return;
+    deleteOrderMutation.mutate({ id: orderToDelete.id });
+  };
+
+  const openPartialPayment = (order: any) => {
+    setOrderForPartialPayment(order);
+    setPartialPaymentAmount("");
+    setShowPartialPayment(true);
+  };
+
+  const handlePartialPayment = () => {
+    if (!orderForPartialPayment || !partialPaymentAmount) return;
+    const amount = parseFloat(partialPaymentAmount);
+    if (isNaN(amount) || amount <= 0) {
+      toast.error("Informe um valor válido");
+      return;
+    }
+    partialPaymentMutation.mutate({
+      id: orderForPartialPayment.id,
+      amount: amount.toFixed(2),
+    });
+  };
+
+  const getRemainingAmount = (order: any) => {
+    const total = parseFloat(order.totalAmount);
+    const paid = parseFloat(order.paidAmount || "0");
+    return Math.max(0, total - paid);
   };
 
   return (
@@ -238,6 +371,9 @@ export default function AdminOrders() {
             {filteredOrders.map((order) => {
               const status = statusConfig[order.orderStatus];
               const StatusIcon = status.icon;
+              const remainingAmount = getRemainingAmount(order);
+              const paidAmount = parseFloat(order.paidAmount || "0");
+              const hasPartialPayment = paidAmount > 0 && remainingAmount > 0;
 
               return (
                 <Card key={order.id} className="card-accessible overflow-hidden">
@@ -264,12 +400,23 @@ export default function AdminOrders() {
                           <p className="text-lg sm:text-xl font-bold text-primary">
                             R$ {parseFloat(order.totalAmount).toFixed(2)}
                           </p>
-                          <Badge 
-                            variant={order.paymentStatus === "pago" ? "default" : "destructive"}
-                            className="text-xs"
-                          >
-                            {order.paymentStatus === "pago" ? "Pago" : "Pendente"}
-                          </Badge>
+                          {hasPartialPayment ? (
+                            <div className="space-y-1">
+                              <Badge variant="secondary" className="text-xs">
+                                Pago: R$ {paidAmount.toFixed(2)}
+                              </Badge>
+                              <Badge variant="destructive" className="text-xs block">
+                                Falta: R$ {remainingAmount.toFixed(2)}
+                              </Badge>
+                            </div>
+                          ) : (
+                            <Badge 
+                              variant={order.paymentStatus === "pago" ? "default" : "destructive"}
+                              className="text-xs"
+                            >
+                              {order.paymentStatus === "pago" ? "Pago" : "Pendente"}
+                            </Badge>
+                          )}
                         </div>
                       </div>
 
@@ -303,7 +450,7 @@ export default function AdminOrders() {
 
                       {/* Action Buttons */}
                       <div className="flex gap-2 flex-wrap">
-                        {/* Botão Ver Detalhes - Sempre visível */}
+                        {/* Botão Ver Detalhes */}
                         <Button
                           variant="outline"
                           size="sm"
@@ -311,20 +458,46 @@ export default function AdminOrders() {
                           onClick={() => setSelectedOrder(order)}
                         >
                           <Eye className="h-4 w-4 mr-1" />
-                          Ver Detalhes
+                          Detalhes
                         </Button>
 
+                        {/* Botões de Pagamento */}
                         {order.paymentStatus !== "pago" && order.orderStatus !== "cancelado" && (
+                          <>
+                            <Button
+                              size="sm"
+                              className="flex-1 sm:flex-none"
+                              onClick={() => handleMarkAsPaid(order.id)}
+                            >
+                              <DollarSign className="h-4 w-4 mr-1" />
+                              Pago Total
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="flex-1 sm:flex-none"
+                              onClick={() => openPartialPayment(order)}
+                            >
+                              <CreditCard className="h-4 w-4 mr-1" />
+                              Parcial
+                            </Button>
+                          </>
+                        )}
+
+                        {/* Desfazer Pagamento */}
+                        {order.paymentStatus === "pago" && order.orderStatus !== "cancelado" && (
                           <Button
+                            variant="outline"
                             size="sm"
-                            className="flex-1 sm:flex-none"
-                            onClick={() => handleMarkAsPaid(order.id)}
+                            className="flex-1 sm:flex-none text-orange-600 hover:text-orange-700"
+                            onClick={() => handleUndoPayment(order.id)}
                           >
-                            <DollarSign className="h-4 w-4 mr-1" />
-                            Pago
+                            <Undo2 className="h-4 w-4 mr-1" />
+                            Desfazer
                           </Button>
                         )}
 
+                        {/* Botões de Status */}
                         {order.orderStatus === "aguardando_pagamento" && (
                           <Button
                             variant="outline"
@@ -361,6 +534,17 @@ export default function AdminOrders() {
                           </Button>
                         )}
 
+                        {/* Editar */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-blue-600 hover:text-blue-700"
+                          onClick={() => openEditModal(order)}
+                        >
+                          <Edit className="h-4 w-4" />
+                        </Button>
+
+                        {/* Cancelar/Excluir */}
                         {order.orderStatus !== "cancelado" && order.orderStatus !== "entregue" && (
                           <Button
                             variant="ghost"
@@ -371,6 +555,16 @@ export default function AdminOrders() {
                             <XCircle className="h-4 w-4" />
                           </Button>
                         )}
+
+                        {/* Excluir permanentemente */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-red-600 hover:text-red-700"
+                          onClick={() => openDeleteConfirm(order)}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
                       </div>
                     </div>
                   </CardContent>
@@ -412,6 +606,18 @@ export default function AdminOrders() {
                       <span>Total</span>
                       <span className="text-primary">R$ {parseFloat(selectedOrder.totalAmount).toFixed(2)}</span>
                     </div>
+                    {parseFloat(selectedOrder.paidAmount || "0") > 0 && (
+                      <>
+                        <div className="flex justify-between text-sm text-green-600">
+                          <span>Pago</span>
+                          <span>R$ {parseFloat(selectedOrder.paidAmount).toFixed(2)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm text-red-600 font-medium">
+                          <span>Restante</span>
+                          <span>R$ {getRemainingAmount(selectedOrder).toFixed(2)}</span>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -448,6 +654,122 @@ export default function AdminOrders() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Edit Order Dialog */}
+        <Dialog open={showEditModal} onOpenChange={setShowEditModal}>
+          <DialogContent className="dialog-content sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle className="text-xl">
+                Editar Pedido #{orderToEdit?.orderNumber}
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 py-2">
+              <div className="space-y-2">
+                <Label>Método de Pagamento</Label>
+                <Select value={editPaymentMethod} onValueChange={setEditPaymentMethod}>
+                  <SelectTrigger className="input-accessible">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="pix">Pix</SelectItem>
+                    <SelectItem value="dinheiro">Dinheiro</SelectItem>
+                    <SelectItem value="cartao">Cartão</SelectItem>
+                    <SelectItem value="fiado">Fiado</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Observações</Label>
+                <Textarea
+                  value={editNotes}
+                  onChange={(e) => setEditNotes(e.target.value)}
+                  placeholder="Observações do pedido..."
+                  className="textarea-accessible min-h-[80px]"
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowEditModal(false)}>
+                Cancelar
+              </Button>
+              <Button onClick={handleSaveEdit} disabled={updateOrderMutation.isPending}>
+                {updateOrderMutation.isPending ? "Salvando..." : "Salvar"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Partial Payment Dialog */}
+        <Dialog open={showPartialPayment} onOpenChange={setShowPartialPayment}>
+          <DialogContent className="dialog-content sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle className="text-xl">
+                Pagamento Parcial - Pedido #{orderForPartialPayment?.orderNumber}
+              </DialogTitle>
+            </DialogHeader>
+            {orderForPartialPayment && (
+              <div className="space-y-4 py-2">
+                <div className="bg-muted/50 rounded-lg p-3 space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span>Total do pedido:</span>
+                    <span className="font-bold">R$ {parseFloat(orderForPartialPayment.totalAmount).toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-green-600">
+                    <span>Já pago:</span>
+                    <span>R$ {parseFloat(orderForPartialPayment.paidAmount || "0").toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm text-red-600 font-medium">
+                    <span>Restante:</span>
+                    <span>R$ {getRemainingAmount(orderForPartialPayment).toFixed(2)}</span>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>Valor a pagar agora (R$)</Label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max={getRemainingAmount(orderForPartialPayment)}
+                    value={partialPaymentAmount}
+                    onChange={(e) => setPartialPaymentAmount(e.target.value)}
+                    placeholder="0,00"
+                    className="input-accessible"
+                  />
+                </div>
+              </div>
+            )}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowPartialPayment(false)}>
+                Cancelar
+              </Button>
+              <Button onClick={handlePartialPayment} disabled={partialPaymentMutation.isPending}>
+                {partialPaymentMutation.isPending ? "Registrando..." : "Registrar Pagamento"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Delete Confirmation Dialog */}
+        <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Excluir Pedido</AlertDialogTitle>
+              <AlertDialogDescription>
+                Tem certeza que deseja excluir permanentemente o pedido #{orderToDelete?.orderNumber}?
+                Esta ação não pode ser desfeita e todos os dados do pedido serão removidos.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancelar</AlertDialogCancel>
+              <AlertDialogAction 
+                onClick={handleDelete}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                {deleteOrderMutation.isPending ? "Excluindo..." : "Excluir"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </AdminLayout>
   );

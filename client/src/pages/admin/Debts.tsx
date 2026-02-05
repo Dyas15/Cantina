@@ -4,13 +4,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { useRealtimeOrders } from "@/hooks/useRealtimeOrders";
-import { Search, AlertCircle, CheckCircle, DollarSign, User, Phone, Calendar, Eye, Package, CreditCard, Banknote, QrCode, Clock } from "lucide-react";
+import { Search, AlertCircle, CheckCircle, DollarSign, User, Phone, Calendar, Eye, Package, CreditCard, Banknote, QrCode, Clock, Undo2 } from "lucide-react";
 
 const paymentLabels: Record<string, string> = {
   pix: "Pix",
@@ -31,6 +31,11 @@ export default function AdminDebts() {
   const [showPaid, setShowPaid] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<any>(null);
   const [paymentMethodFilter, setPaymentMethodFilter] = useState<string>("all");
+  
+  // Estados para pagamento parcial
+  const [showPartialPayment, setShowPartialPayment] = useState(false);
+  const [orderForPartialPayment, setOrderForPartialPayment] = useState<any>(null);
+  const [partialPaymentAmount, setPartialPaymentAmount] = useState("");
 
   const utils = trpc.useUtils();
   
@@ -52,6 +57,37 @@ export default function AdminDebts() {
       utils.order.list.invalidate();
       utils.customer.list.invalidate();
       utils.debt.list.invalidate();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const undoPaymentMutation = trpc.order.undoPayment.useMutation({
+    onSuccess: () => {
+      toast.success("Pagamento revertido para pendente!");
+      utils.order.list.invalidate();
+      utils.customer.list.invalidate();
+      utils.debt.list.invalidate();
+      utils.report.sales.invalidate();
+      utils.report.financialSummary.invalidate();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const partialPaymentMutation = trpc.order.registerPartialPayment.useMutation({
+    onSuccess: () => {
+      toast.success("Pagamento parcial registrado!");
+      setShowPartialPayment(false);
+      setOrderForPartialPayment(null);
+      setPartialPaymentAmount("");
+      utils.order.list.invalidate();
+      utils.customer.list.invalidate();
+      utils.debt.list.invalidate();
+      utils.report.sales.invalidate();
+      utils.report.financialSummary.invalidate();
     },
     onError: (error) => {
       toast.error(error.message);
@@ -91,24 +127,58 @@ export default function AdminDebts() {
     }
     acc[order.customerId].orders.push(order);
     if (order.paymentStatus === 'pendente') {
-      acc[order.customerId].totalPending += parseFloat(order.totalAmount);
+      const remaining = parseFloat(order.totalAmount) - parseFloat(order.paidAmount || "0");
+      acc[order.customerId].totalPending += remaining;
     }
     return acc;
   }, {});
 
   const totalPending = filteredOrders
     .filter((o) => o.paymentStatus === 'pendente')
-    .reduce((sum, o) => sum + parseFloat(o.totalAmount), 0);
+    .reduce((sum, o) => {
+      const remaining = parseFloat(o.totalAmount) - parseFloat(o.paidAmount || "0");
+      return sum + remaining;
+    }, 0);
 
   // Estatísticas por método de pagamento
   const pendingByMethod = orders?.filter(o => o.paymentStatus === 'pendente' && o.orderStatus !== 'cancelado')
     .reduce((acc: Record<string, number>, order) => {
-      acc[order.paymentMethod] = (acc[order.paymentMethod] || 0) + parseFloat(order.totalAmount);
+      const remaining = parseFloat(order.totalAmount) - parseFloat(order.paidAmount || "0");
+      acc[order.paymentMethod] = (acc[order.paymentMethod] || 0) + remaining;
       return acc;
     }, {}) || {};
 
   const handleMarkAsPaid = (orderId: number) => {
     updatePaymentMutation.mutate({ id: orderId, status: "pago" });
+  };
+
+  const handleUndoPayment = (orderId: number) => {
+    undoPaymentMutation.mutate({ id: orderId });
+  };
+
+  const openPartialPayment = (order: any) => {
+    setOrderForPartialPayment(order);
+    setPartialPaymentAmount("");
+    setShowPartialPayment(true);
+  };
+
+  const handlePartialPayment = () => {
+    if (!orderForPartialPayment || !partialPaymentAmount) return;
+    const amount = parseFloat(partialPaymentAmount);
+    if (isNaN(amount) || amount <= 0) {
+      toast.error("Informe um valor válido");
+      return;
+    }
+    partialPaymentMutation.mutate({
+      id: orderForPartialPayment.id,
+      amount: amount.toFixed(2),
+    });
+  };
+
+  const getRemainingAmount = (order: any) => {
+    const total = parseFloat(order.totalAmount);
+    const paid = parseFloat(order.paidAmount || "0");
+    return Math.max(0, total - paid);
   };
 
   return (
@@ -198,7 +268,7 @@ export default function AdminDebts() {
               <p className="font-medium">Como funciona o sistema de dívidas</p>
               <p className="text-blue-600 mt-1">
                 Todos os pedidos (Pix, Cartão, Dinheiro, Fiado) ficam como "pendentes" até que você confirme o pagamento manualmente. 
-                Clique em "Marcar Pago" quando receber o valor.
+                Você pode registrar pagamentos parciais ou desfazer um pagamento já confirmado.
               </p>
             </div>
           </div>
@@ -265,6 +335,9 @@ export default function AdminDebts() {
                     <div className="space-y-2">
                       {group.orders.map((order: any) => {
                         const PaymentIcon = paymentIcons[order.paymentMethod];
+                        const remaining = getRemainingAmount(order);
+                        const paidAmount = parseFloat(order.paidAmount || "0");
+                        const hasPartialPayment = paidAmount > 0 && remaining > 0;
                         
                         return (
                           <div
@@ -290,6 +363,11 @@ export default function AdminDebts() {
                                     {new Date(order.createdAt).toLocaleDateString("pt-BR")}
                                   </p>
                                 </div>
+                                {hasPartialPayment && (
+                                  <p className="text-xs text-orange-600 mt-1">
+                                    Pago parcial: R$ {paidAmount.toFixed(2)} de R$ {parseFloat(order.totalAmount).toFixed(2)}
+                                  </p>
+                                )}
                                 {order.paymentStatus === "pago" && (
                                   <p className="text-xs text-green-600 mt-1">
                                     Pago em: {new Date(order.updatedAt).toLocaleDateString("pt-BR")}
@@ -301,16 +379,22 @@ export default function AdminDebts() {
                                   <p className="text-lg sm:text-xl font-bold">
                                     R$ {parseFloat(order.totalAmount).toFixed(2)}
                                   </p>
-                                  <Badge 
-                                    variant={order.paymentStatus === "pago" ? "default" : "destructive"}
-                                    className="text-xs"
-                                  >
-                                    {order.paymentStatus === "pago" ? "Pago" : "Pendente"}
-                                  </Badge>
+                                  {hasPartialPayment ? (
+                                    <Badge variant="secondary" className="text-xs">
+                                      Falta: R$ {remaining.toFixed(2)}
+                                    </Badge>
+                                  ) : (
+                                    <Badge 
+                                      variant={order.paymentStatus === "pago" ? "default" : "destructive"}
+                                      className="text-xs"
+                                    >
+                                      {order.paymentStatus === "pago" ? "Pago" : "Pendente"}
+                                    </Badge>
+                                  )}
                                 </div>
                               </div>
                             </div>
-                            <div className="flex gap-2 mt-3">
+                            <div className="flex gap-2 mt-3 flex-wrap">
                               <Button
                                 variant="outline"
                                 size="sm"
@@ -318,17 +402,40 @@ export default function AdminDebts() {
                                 onClick={() => setSelectedOrder(order)}
                               >
                                 <Eye className="h-4 w-4 mr-1" />
-                                Ver Detalhes
+                                Detalhes
                               </Button>
                               {order.paymentStatus !== "pago" && (
+                                <>
+                                  <Button
+                                    size="sm"
+                                    className="flex-1"
+                                    onClick={() => handleMarkAsPaid(order.id)}
+                                    disabled={updatePaymentMutation.isPending}
+                                  >
+                                    <DollarSign className="h-4 w-4 mr-1" />
+                                    Pago Total
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="flex-1"
+                                    onClick={() => openPartialPayment(order)}
+                                  >
+                                    <CreditCard className="h-4 w-4 mr-1" />
+                                    Parcial
+                                  </Button>
+                                </>
+                              )}
+                              {order.paymentStatus === "pago" && (
                                 <Button
+                                  variant="outline"
                                   size="sm"
-                                  className="flex-1"
-                                  onClick={() => handleMarkAsPaid(order.id)}
-                                  disabled={updatePaymentMutation.isPending}
+                                  className="flex-1 text-orange-600 hover:text-orange-700"
+                                  onClick={() => handleUndoPayment(order.id)}
+                                  disabled={undoPaymentMutation.isPending}
                                 >
-                                  <DollarSign className="h-4 w-4 mr-1" />
-                                  Marcar Pago
+                                  <Undo2 className="h-4 w-4 mr-1" />
+                                  Desfazer
                                 </Button>
                               )}
                             </div>
@@ -375,6 +482,18 @@ export default function AdminDebts() {
                     <span>Total</span>
                     <span className="text-primary">R$ {parseFloat(selectedOrder.totalAmount).toFixed(2)}</span>
                   </div>
+                  {parseFloat(selectedOrder.paidAmount || "0") > 0 && (
+                    <>
+                      <div className="flex justify-between text-sm text-green-600">
+                        <span>Pago</span>
+                        <span>R$ {parseFloat(selectedOrder.paidAmount).toFixed(2)}</span>
+                      </div>
+                      <div className="flex justify-between text-sm text-red-600 font-medium">
+                        <span>Restante</span>
+                        <span>R$ {getRemainingAmount(selectedOrder).toFixed(2)}</span>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -410,21 +529,59 @@ export default function AdminDebts() {
               </div>
             </div>
           )}
-          <DialogFooter className="flex gap-2">
-            {selectedOrder?.paymentStatus !== "pago" && (
-              <Button
-                onClick={() => {
-                  handleMarkAsPaid(selectedOrder.id);
-                  setSelectedOrder(null);
-                }}
-                disabled={updatePaymentMutation.isPending}
-              >
-                <DollarSign className="h-4 w-4 mr-1" />
-                Marcar como Pago
-              </Button>
-            )}
+          <DialogFooter>
             <Button variant="outline" onClick={() => setSelectedOrder(null)}>
               Fechar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Partial Payment Dialog */}
+      <Dialog open={showPartialPayment} onOpenChange={setShowPartialPayment}>
+        <DialogContent className="dialog-content sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-xl">
+              Pagamento Parcial - Pedido #{orderForPartialPayment?.orderNumber}
+            </DialogTitle>
+          </DialogHeader>
+          {orderForPartialPayment && (
+            <div className="space-y-4 py-2">
+              <div className="bg-muted/50 rounded-lg p-3 space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span>Total do pedido:</span>
+                  <span className="font-bold">R$ {parseFloat(orderForPartialPayment.totalAmount).toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-sm text-green-600">
+                  <span>Já pago:</span>
+                  <span>R$ {parseFloat(orderForPartialPayment.paidAmount || "0").toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between text-sm text-red-600 font-medium">
+                  <span>Restante:</span>
+                  <span>R$ {getRemainingAmount(orderForPartialPayment).toFixed(2)}</span>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Valor a pagar agora (R$)</Label>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max={getRemainingAmount(orderForPartialPayment)}
+                  value={partialPaymentAmount}
+                  onChange={(e) => setPartialPaymentAmount(e.target.value)}
+                  placeholder="0,00"
+                  className="input-accessible"
+                />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowPartialPayment(false)}>
+              Cancelar
+            </Button>
+            <Button onClick={handlePartialPayment} disabled={partialPaymentMutation.isPending}>
+              {partialPaymentMutation.isPending ? "Registrando..." : "Registrar Pagamento"}
             </Button>
           </DialogFooter>
         </DialogContent>

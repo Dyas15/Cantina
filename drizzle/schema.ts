@@ -68,6 +68,7 @@ export const orders = mysqlTable("orders", {
   customerId: int("customer_id").notNull(),
   orderNumber: int("order_number").notNull(), // Número sequencial do dia
   totalAmount: decimal("total_amount", { precision: 10, scale: 2 }).notNull(),
+  paidAmount: decimal("paid_amount", { precision: 10, scale: 2 }).default("0").notNull(), // Valor já pago (para pagamento parcial)
   paymentMethod: mysqlEnum("payment_method", paymentMethodValues).notNull(),
   paymentStatus: mysqlEnum("payment_status", paymentStatusValues).default("pendente").notNull(),
   orderStatus: mysqlEnum("order_status", orderStatusValues).default("aguardando_pagamento").notNull(),
