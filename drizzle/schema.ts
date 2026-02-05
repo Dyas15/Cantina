@@ -99,12 +99,12 @@ export type OrderItem = typeof orderItems.$inferSelect;
 export type InsertOrderItem = typeof orderItems.$inferInsert;
 
 /**
- * Dívidas (fiado) - cada pedido fiado gera uma dívida
+ * Dívidas (fiado) - sempre vinculada a um pedido para rastreabilidade
  */
 export const debts = mysqlTable("debts", {
   id: serial("id").primaryKey(),
   customerId: int("customer_id").notNull(),
-  orderId: int("order_id").notNull(),
+  orderId: int("order_id").notNull(), // Sempre obrigatório - vinculado a um pedido
   amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
   isPaid: boolean("is_paid").default(false).notNull(),
   paidAt: timestamp("paid_at"),

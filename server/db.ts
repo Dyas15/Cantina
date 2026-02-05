@@ -322,6 +322,61 @@ export async function updateCustomerTotals(customerId: number, amountSpent: numb
   }, `update customer totals ${customerId}`);
 }
 
+// Atualizar dados do cliente
+export async function updateCustomer(customerId: number, updates: {
+  name?: string;
+  phone?: string;
+}): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  return executeWithLogging('updateCustomer', async () => {
+    const updateData: Record<string, any> = {};
+    
+    if (updates.name !== undefined) {
+      updateData.name = updates.name.trim();
+    }
+    if (updates.phone !== undefined) {
+      updateData.phone = updates.phone.replace(/\D/g, '');
+    }
+
+    if (Object.keys(updateData).length > 0) {
+      await db.update(customers).set(updateData).where(eq(customers.id, customerId));
+      logger.info('Customer updated', { customerId, updates: Object.keys(updateData) });
+    }
+  }, `update customer ${customerId}`);
+}
+
+// Excluir cliente (apenas se não tiver pedidos ou dívidas)
+export async function deleteCustomer(customerId: number): Promise<{ success: boolean; message?: string }> {
+  const db = await getDb();
+  if (!db) return { success: false, message: "Database not available" };
+
+  return executeWithLogging('deleteCustomer', async () => {
+    // Verifica se tem pedidos
+    const orderCount = await db.select({ count: sql<number>`COUNT(*)` })
+      .from(orders)
+      .where(eq(orders.customerId, customerId));
+    
+    if (Number(orderCount[0]?.count || 0) > 0) {
+      return { success: false, message: "Não é possível excluir cliente com pedidos. Exclua os pedidos primeiro." };
+    }
+
+    // Verifica se tem dívidas
+    const debtCount = await db.select({ count: sql<number>`COUNT(*)` })
+      .from(debts)
+      .where(eq(debts.customerId, customerId));
+    
+    if (Number(debtCount[0]?.count || 0) > 0) {
+      return { success: false, message: "Não é possível excluir cliente com dívidas. Exclua as dívidas primeiro." };
+    }
+
+    await db.delete(customers).where(eq(customers.id, customerId));
+    logger.info('Customer deleted', { customerId });
+    return { success: true };
+  }, `delete customer ${customerId}`);
+}
+
 // Função para recalcular o totalDebt de um cliente baseado nas dívidas reais
 export async function recalculateCustomerDebt(customerId: number): Promise<void> {
   const db = await getDb();
@@ -850,6 +905,67 @@ export async function markDebtAsPaid(debtId: number): Promise<void> {
       // Ignora se eventos não estiverem disponíveis
     }
   }, `mark debt as paid ${debtId}`);
+}
+
+
+
+// Excluir dívida
+export async function deleteDebt(debtId: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  return executeWithLogging('deleteDebt', async () => {
+    const debtResult = await db.select().from(debts).where(eq(debts.id, debtId)).limit(1);
+    if (debtResult.length === 0) throw new Error("Dívida não encontrada");
+
+    const debt = debtResult[0];
+
+    // Se a dívida não foi paga, subtrai do totalDebt do cliente
+    if (!debt.isPaid) {
+      await db.update(customers)
+        .set({
+          totalDebt: sql`GREATEST(${customers.totalDebt} - ${debt.amount}, 0)`,
+        })
+        .where(eq(customers.id, debt.customerId));
+    }
+
+    await db.delete(debts).where(eq(debts.id, debtId));
+    logger.info('Debt deleted', { debtId, customerId: debt.customerId });
+  }, `delete debt ${debtId}`);
+}
+
+// Desfazer pagamento de dívida
+export async function undoDebtPayment(debtId: number): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  return executeWithLogging('undoDebtPayment', async () => {
+    const debtResult = await db.select().from(debts).where(eq(debts.id, debtId)).limit(1);
+    if (debtResult.length === 0) throw new Error("Dívida não encontrada");
+
+    const debt = debtResult[0];
+
+    // Só processa se a dívida já foi paga
+    if (!debt.isPaid) return;
+
+    await db.update(debts).set({ 
+      isPaid: false, 
+      paidAt: null 
+    }).where(eq(debts.id, debtId));
+
+    // Atualiza o status do pagamento do pedido
+    await db.update(orders).set({ paymentStatus: 'pendente' }).where(eq(orders.id, debt.orderId));
+
+    // Reverte totais do cliente - adiciona à dívida e subtrai do gasto
+    await db.update(customers)
+      .set({
+        totalDebt: sql`${customers.totalDebt} + ${debt.amount}`,
+        totalSpent: sql`GREATEST(${customers.totalSpent} - ${debt.amount}, 0)`,
+      })
+      .where(eq(customers.id, debt.customerId));
+    
+    logger.info('Debt payment undone', { debtId, orderId: debt.orderId, customerId: debt.customerId });
+  }, `undo debt payment ${debtId}`);
 }
 
 // ==================== EXPENSE QUERIES ====================

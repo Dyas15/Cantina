@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
@@ -24,7 +25,9 @@ import {
   Wallet,
   Eye,
   User,
-  UserPlus
+  UserPlus,
+  Pencil,
+  Trash2
 } from "lucide-react";
 
 interface CartItem {
@@ -43,12 +46,17 @@ export default function AdminCustomers() {
   const [showOrderDialog, setShowOrderDialog] = useState(false);
   const [showDetailsDialog, setShowDetailsDialog] = useState(false);
   const [showCreateCustomerDialog, setShowCreateCustomerDialog] = useState(false);
+  const [showEditCustomerDialog, setShowEditCustomerDialog] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [customerToDelete, setCustomerToDelete] = useState<any>(null);
   const [cart, setCart] = useState<CartItem[]>([]);
-  const [paymentMethod, setPaymentMethod] = useState<string>("dinheiro");
+  const [paymentMethod, setPaymentMethod] = useState<"pix" | "dinheiro" | "cartao" | "fiado">("dinheiro");
   
-  // Campos para novo cliente
+  // Campos para novo/editar cliente
   const [newCustomerName, setNewCustomerName] = useState("");
   const [newCustomerPhone, setNewCustomerPhone] = useState("");
+  const [editCustomerName, setEditCustomerName] = useState("");
+  const [editCustomerPhone, setEditCustomerPhone] = useState("");
 
   const utils = trpc.useUtils();
 
@@ -59,12 +67,37 @@ export default function AdminCustomers() {
     { enabled: !!selectedCustomer }
   );
 
-  // Mutation para criar cliente (usa a rota create que requer admin)
+  // Mutation para criar cliente
   const createCustomerMutation = trpc.customer.create.useMutation({
     onSuccess: (customer) => {
       toast.success(`Cliente "${customer.name}" cadastrado com sucesso!`);
       utils.customer.list.invalidate();
       closeCreateCustomerDialog();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  // Mutation para atualizar cliente
+  const updateCustomerMutation = trpc.customer.update.useMutation({
+    onSuccess: () => {
+      toast.success("Cliente atualizado com sucesso!");
+      utils.customer.list.invalidate();
+      closeEditCustomerDialog();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  // Mutation para excluir cliente
+  const deleteCustomerMutation = trpc.customer.delete.useMutation({
+    onSuccess: () => {
+      toast.success("Cliente excluído com sucesso!");
+      utils.customer.list.invalidate();
+      setShowDeleteConfirm(false);
+      setCustomerToDelete(null);
     },
     onError: (error) => {
       toast.error(error.message);
@@ -131,6 +164,25 @@ export default function AdminCustomers() {
     setNewCustomerPhone("");
   };
 
+  const openEditCustomerDialog = (customer: any) => {
+    setSelectedCustomer(customer);
+    setEditCustomerName(customer.name);
+    setEditCustomerPhone(formatPhone(customer.phone));
+    setShowEditCustomerDialog(true);
+  };
+
+  const closeEditCustomerDialog = () => {
+    setShowEditCustomerDialog(false);
+    setSelectedCustomer(null);
+    setEditCustomerName("");
+    setEditCustomerPhone("");
+  };
+
+  const openDeleteConfirm = (customer: any) => {
+    setCustomerToDelete(customer);
+    setShowDeleteConfirm(true);
+  };
+
   const handleCreateCustomer = () => {
     if (!newCustomerName.trim()) {
       toast.error("Digite o nome do cliente");
@@ -147,6 +199,29 @@ export default function AdminCustomers() {
     });
   };
 
+  const handleUpdateCustomer = () => {
+    if (!selectedCustomer) return;
+    if (!editCustomerName.trim()) {
+      toast.error("Digite o nome do cliente");
+      return;
+    }
+    if (!editCustomerPhone.trim() || editCustomerPhone.replace(/\D/g, '').length < 8) {
+      toast.error("Digite um telefone válido");
+      return;
+    }
+
+    updateCustomerMutation.mutate({
+      id: selectedCustomer.id,
+      name: editCustomerName.trim(),
+      phone: editCustomerPhone.trim(),
+    });
+  };
+
+  const handleDeleteCustomer = () => {
+    if (!customerToDelete) return;
+    deleteCustomerMutation.mutate({ id: customerToDelete.id });
+  };
+
   // Formatar telefone enquanto digita
   const formatPhone = (value: string) => {
     const numbers = value.replace(/\D/g, '');
@@ -156,11 +231,11 @@ export default function AdminCustomers() {
     return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 7)}-${numbers.slice(7, 11)}`;
   };
 
-  const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const formatted = formatPhone(e.target.value);
-    setNewCustomerPhone(formatted);
+  const handlePhoneChange = (e: React.ChangeEvent<HTMLInputElement>, setter: (value: string) => void) => {
+    setter(formatPhone(e.target.value));
   };
 
+  // Carrinho
   const addToCart = (product: any, flavor?: string) => {
     const existingIndex = cart.findIndex(
       (item) => item.productId === product.id && item.flavor === flavor
@@ -170,7 +245,7 @@ export default function AdminCustomers() {
       const newCart = [...cart];
       newCart[existingIndex].quantity += 1;
       newCart[existingIndex].subtotal = (
-        parseFloat(newCart[existingIndex].unitPrice) * newCart[existingIndex].quantity
+        newCart[existingIndex].quantity * parseFloat(newCart[existingIndex].unitPrice)
       ).toFixed(2);
       setCart(newCart);
     } else {
@@ -195,7 +270,7 @@ export default function AdminCustomers() {
       newCart.splice(index, 1);
     } else {
       newCart[index].subtotal = (
-        parseFloat(newCart[index].unitPrice) * newCart[index].quantity
+        newCart[index].quantity * parseFloat(newCart[index].unitPrice)
       ).toFixed(2);
     }
     setCart(newCart);
@@ -204,105 +279,90 @@ export default function AdminCustomers() {
   const cartTotal = cart.reduce((sum, item) => sum + parseFloat(item.subtotal), 0);
 
   const handleCreateOrder = () => {
-    if (cart.length === 0) {
-      toast.error("Adicione pelo menos um item ao pedido");
-      return;
-    }
+    if (!selectedCustomer || cart.length === 0) return;
 
     createOrderMutation.mutate({
       customerId: selectedCustomer.id,
       items: cart,
       totalAmount: cartTotal.toFixed(2),
-      paymentMethod: paymentMethod as any,
-      isPresencial: true,
+      paymentMethod,
     });
   };
 
-  const unpaidDebts = customerDebts?.filter((d) => !d.isPaid) || [];
-  const totalDebt = unpaidDebts.reduce((sum, d) => sum + parseFloat(d.amount), 0);
+  // Calcula dívida total do cliente selecionado
+  const totalDebt = customerDebts?.reduce((sum, d) => {
+    if (!d.isPaid) {
+      return sum + parseFloat(d.amount);
+    }
+    return sum;
+  }, 0) || 0;
 
   return (
     <AdminLayout>
       <div className="space-y-4 sm:space-y-6">
         {/* Header */}
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl sm:text-3xl font-bold flex items-center gap-2">
               <Users className="h-7 w-7 sm:h-8 sm:w-8 text-primary" />
               Clientes
             </h1>
             <p className="text-sm sm:text-base text-muted-foreground mt-1">
-              Gerencie seus clientes e faça pedidos presenciais
+              Gerencie clientes e crie pedidos
             </p>
           </div>
-          <Button 
-            className="btn-primary shrink-0"
-            onClick={openCreateCustomerDialog}
-          >
+          <Button onClick={openCreateCustomerDialog} className="btn-primary w-full sm:w-auto">
             <UserPlus className="h-4 w-4 mr-2" />
-            <span className="hidden sm:inline">Novo Cliente</span>
-            <span className="sm:hidden">Novo</span>
+            Novo Cliente
           </Button>
         </div>
 
-        {/* Stats Cards */}
+        {/* Stats */}
         <div className="grid gap-3 sm:gap-4 grid-cols-2 lg:grid-cols-4">
-          <Card className="card-highlight">
-            <CardContent className="pt-4 pb-4">
-              <div className="flex items-center gap-3">
-                <div className="bg-primary/10 p-2.5 rounded-xl">
-                  <Users className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <p className="text-xs sm:text-sm text-muted-foreground">Total</p>
-                  <p className="text-xl sm:text-2xl font-bold">{totalCustomers}</p>
-                </div>
+          <Card className="card-accessible">
+            <CardContent className="p-3 sm:p-4 flex items-center gap-3">
+              <div className="p-2 sm:p-3 bg-primary/10 rounded-xl">
+                <Users className="h-5 w-5 sm:h-6 sm:w-6 text-primary" />
+              </div>
+              <div>
+                <p className="text-xs sm:text-sm text-muted-foreground">Total</p>
+                <p className="text-xl sm:text-2xl font-bold">{totalCustomers}</p>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="bg-green-50 border-green-200">
-            <CardContent className="pt-4 pb-4">
-              <div className="flex items-center gap-3">
-                <div className="bg-green-100 p-2.5 rounded-xl">
-                  <TrendingUp className="h-5 w-5 text-green-600" />
-                </div>
-                <div>
-                  <p className="text-xs sm:text-sm text-green-700">Faturado</p>
-                  <p className="text-lg sm:text-xl font-bold text-green-700">
-                    R$ {totalSpentAll.toFixed(0)}
-                  </p>
-                </div>
+          <Card className="card-accessible">
+            <CardContent className="p-3 sm:p-4 flex items-center gap-3">
+              <div className="p-2 sm:p-3 bg-green-100 rounded-xl">
+                <TrendingUp className="h-5 w-5 sm:h-6 sm:w-6 text-green-600" />
+              </div>
+              <div>
+                <p className="text-xs sm:text-sm text-muted-foreground">Faturado</p>
+                <p className="text-lg sm:text-xl font-bold text-green-600">R$ {totalSpentAll.toFixed(2)}</p>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="bg-red-50 border-red-200">
-            <CardContent className="pt-4 pb-4">
-              <div className="flex items-center gap-3">
-                <div className="bg-red-100 p-2.5 rounded-xl">
-                  <AlertCircle className="h-5 w-5 text-red-600" />
-                </div>
-                <div>
-                  <p className="text-xs sm:text-sm text-red-700">Dívidas</p>
-                  <p className="text-lg sm:text-xl font-bold text-red-700">
-                    R$ {totalDebtAll.toFixed(2)}
-                  </p>
-                </div>
+          <Card className="card-accessible">
+            <CardContent className="p-3 sm:p-4 flex items-center gap-3">
+              <div className="p-2 sm:p-3 bg-red-100 rounded-xl">
+                <Wallet className="h-5 w-5 sm:h-6 sm:w-6 text-red-600" />
+              </div>
+              <div>
+                <p className="text-xs sm:text-sm text-muted-foreground">Em Dívidas</p>
+                <p className="text-lg sm:text-xl font-bold text-red-600">R$ {totalDebtAll.toFixed(2)}</p>
               </div>
             </CardContent>
           </Card>
 
-          <Card className="bg-orange-50 border-orange-200">
-            <CardContent className="pt-4 pb-4">
-              <div className="flex items-center gap-3">
-                <div className="bg-orange-100 p-2.5 rounded-xl">
-                  <Wallet className="h-5 w-5 text-orange-600" />
-                </div>
-                <div>
-                  <p className="text-xs sm:text-sm text-orange-700">Devedores</p>
-                  <p className="text-xl sm:text-2xl font-bold text-orange-700">{customersWithDebt}</p>
-                </div>
+          <Card className="card-accessible">
+            <CardContent className="p-3 sm:p-4 flex items-center gap-3">
+              <div className="p-2 sm:p-3 bg-orange-100 rounded-xl">
+                <AlertCircle className="h-5 w-5 sm:h-6 sm:w-6 text-orange-600" />
+              </div>
+              <div>
+                <p className="text-xs sm:text-sm text-orange-700">Devedores</p>
+                <p className="text-xl sm:text-2xl font-bold text-orange-700">{customersWithDebt}</p>
               </div>
             </CardContent>
           </Card>
@@ -405,7 +465,7 @@ export default function AdminCustomers() {
                     </div>
 
                     {/* Actions */}
-                    <div className="p-3 bg-muted/30 flex gap-2">
+                    <div className="p-3 bg-muted/30 flex gap-2 flex-wrap">
                       <Button
                         variant="outline"
                         size="sm"
@@ -413,7 +473,22 @@ export default function AdminCustomers() {
                         onClick={() => openDetailsDialog(customer)}
                       >
                         <Eye className="h-4 w-4 mr-1" />
-                        Detalhes
+                        Ver
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openEditCustomerDialog(customer)}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => openDeleteConfirm(customer)}
+                      >
+                        <Trash2 className="h-4 w-4" />
                       </Button>
                       <Button
                         size="sm"
@@ -421,7 +496,7 @@ export default function AdminCustomers() {
                         onClick={() => openOrderDialog(customer)}
                       >
                         <ShoppingCart className="h-4 w-4 mr-1" />
-                        Novo Pedido
+                        Pedido
                       </Button>
                     </div>
                   </CardContent>
@@ -457,7 +532,7 @@ export default function AdminCustomers() {
                   id="customerPhone"
                   placeholder="(00) 00000-0000"
                   value={newCustomerPhone}
-                  onChange={handlePhoneChange}
+                  onChange={(e) => handlePhoneChange(e, setNewCustomerPhone)}
                   className="input-accessible"
                   maxLength={15}
                 />
@@ -480,6 +555,78 @@ export default function AdminCustomers() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Edit Customer Dialog */}
+        <Dialog open={showEditCustomerDialog} onOpenChange={closeEditCustomerDialog}>
+          <DialogContent className="dialog-content sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle className="text-xl flex items-center gap-2">
+                <Pencil className="h-5 w-5" />
+                Editar Cliente
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="editCustomerName">Nome Completo *</Label>
+                <Input
+                  id="editCustomerName"
+                  placeholder="Ex: João da Silva"
+                  value={editCustomerName}
+                  onChange={(e) => setEditCustomerName(e.target.value)}
+                  className="input-accessible"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="editCustomerPhone">Telefone *</Label>
+                <Input
+                  id="editCustomerPhone"
+                  placeholder="(00) 00000-0000"
+                  value={editCustomerPhone}
+                  onChange={(e) => handlePhoneChange(e, setEditCustomerPhone)}
+                  className="input-accessible"
+                  maxLength={15}
+                />
+              </div>
+            </div>
+            <DialogFooter className="flex-col sm:flex-row gap-2">
+              <Button variant="outline" onClick={closeEditCustomerDialog} className="w-full sm:w-auto">
+                Cancelar
+              </Button>
+              <Button
+                className="btn-primary w-full sm:w-auto"
+                onClick={handleUpdateCustomer}
+                disabled={updateCustomerMutation.isPending}
+              >
+                {updateCustomerMutation.isPending ? "Salvando..." : "Salvar Alterações"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Delete Confirm Dialog */}
+        <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Excluir Cliente</AlertDialogTitle>
+              <AlertDialogDescription>
+                Tem certeza que deseja excluir o cliente <strong>{customerToDelete?.name}</strong>?
+                <br /><br />
+                <span className="text-destructive">
+                  Esta ação só é possível se o cliente não tiver pedidos ou dívidas.
+                </span>
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancelar</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleDeleteCustomer}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                {deleteCustomerMutation.isPending ? "Excluindo..." : "Excluir"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         {/* Customer Details Dialog */}
         <Dialog open={showDetailsDialog} onOpenChange={closeDetailsDialog}>
@@ -714,7 +861,7 @@ export default function AdminCustomers() {
                 {/* Payment Method */}
                 <div>
                   <Label className="text-base font-semibold">Forma de Pagamento</Label>
-                  <Select value={paymentMethod} onValueChange={setPaymentMethod}>
+                  <Select value={paymentMethod} onValueChange={(value) => setPaymentMethod(value as "pix" | "dinheiro" | "cartao" | "fiado")}>
                     <SelectTrigger className="input-accessible mt-2">
                       <SelectValue />
                     </SelectTrigger>

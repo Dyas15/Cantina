@@ -197,6 +197,30 @@ export const appRouter = router({
         await db.recalculateCustomerDebt(input.customerId);
         return { success: true };
       }),
+
+    // Atualizar cliente
+    update: adminProcedure
+      .input(z.object({
+        id: z.number(),
+        name: z.string().min(2, "Nome deve ter pelo menos 2 caracteres").optional(),
+        phone: z.string().min(8, "Telefone inválido").optional(),
+      }))
+      .mutation(async ({ input }) => {
+        const { id, ...updates } = input;
+        await db.updateCustomer(id, updates);
+        return { success: true };
+      }),
+
+    // Excluir cliente
+    delete: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        const result = await db.deleteCustomer(input.id);
+        if (!result.success) {
+          throw new TRPCError({ code: 'BAD_REQUEST', message: result.message });
+        }
+        return { success: true };
+      }),
   }),
 
   // ==================== PRODUCT ROUTES ====================
@@ -480,6 +504,14 @@ export const appRouter = router({
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
         await db.markDebtAsPaid(input.id);
+        return { success: true };
+      }),
+
+    // Desfazer pagamento
+    undoPayment: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input }) => {
+        await db.undoDebtPayment(input.id);
         return { success: true };
       }),
   }),
